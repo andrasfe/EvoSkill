@@ -424,7 +424,14 @@ class ProgramManager:
 
     def _git_tag(self, tag: str) -> None:
         """Create a tag at current HEAD."""
-        self._run_git(["tag", tag])
+        # Check if tag already exists
+        existing_tags = self._git_list_tags()
+        if tag in existing_tags:
+            # Tag already exists, force update to current HEAD
+            self._run_git(["tag", "-f", tag])
+        else:
+            # Create new tag
+            self._run_git(["tag", tag])
 
     def _git_tag_delete(self, tag: str) -> None:
         """Delete a tag."""
