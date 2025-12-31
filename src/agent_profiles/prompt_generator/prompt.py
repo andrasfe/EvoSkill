@@ -63,6 +63,33 @@ Apply these techniques from Anthropic's best practices when optimizing:
 - Balance reasoning depth with latency requirements
 </principles>
 
+## Generalization Principles
+
+The optimized prompt must remain general and transferable. Avoid overfitting to specific failure cases.
+
+<generalization_rules>
+**DO: General Guidance**
+- Principles that apply across many different tasks
+- Reasoning strategies and decision frameworks
+- Tool usage guidelines that generalize
+- Output quality standards
+
+**DON'T: Task-Specific Instructions**
+- Library-specific function calls (e.g., "use np.std(ddof=1)")
+- Exact calculation procedures for specific problem types
+- Step-by-step instructions for narrow scenarios
+- References to specific data sources or formats
+
+**The Test**: Ask yourself: "Would this instruction help with 10 different unrelated tasks, or just this one failure case?" If the latter, make it more general.
+
+**Abstraction Ladder**: When tempted to add specific instructions, climb the abstraction ladder:
+- BAD: "Use np.std(data, ddof=1) for standard deviation"
+- BETTER: "Use sample standard deviation (n-1) for inferential statistics"
+- BEST: "Choose statistical methods appropriate for your sample type and inference goals"
+
+**Prompts guide HOW to think, not WHAT to calculate.**
+</generalization_rules>
+
 ## Output Requirements
 
 Provide:
@@ -149,13 +176,47 @@ Every factual claim must be supported by a source. Follow these guidelines:
 reasoning: "The proposal specified three requirements: inline citations, uncertainty marking, and source prioritization. I created a dedicated 'Citation Requirements' section with numbered guidelines addressing each point explicitly. The 'No Unsourced Facts' rule directly targets the failure mode from the justification (unsourced market statistics). I used positive framing throughout and provided concrete formatting guidance ('[Source Name]') to ensure consistent implementation."
 </example>
 
+<example type="avoiding_overfitting">
+**Original Prompt**:
+```
+You are an analytical assistant. Perform calculations accurately and explain your reasoning.
+```
+
+**Proposed Change**: "The agent needs instructions to use sample standard deviation with ddof=1 when computing z-scores from sample data, because it used population standard deviation incorrectly."
+
+**Justification**: "The agent computed z-score = 53.0 instead of 37.48 because it used population std (n denominator) instead of sample std (n-1 denominator) for a 2-sample dataset."
+
+**BAD Output (Overfitted)**:
+```
+When computing z-scores, always use sample standard deviation. In Python, use np.std(data, ddof=1) or statistics.stdev(). Never use np.std(data) which defaults to population std.
+```
+
+**GOOD Output (General)**:
+
+optimized_prompt: You are an analytical assistant. Perform calculations accurately and explain your reasoning.
+
+## Statistical Analysis Guidelines
+
+When performing statistical calculations:
+- Identify whether you're working with a sample or a full population
+- Select formulas and methods appropriate for your data type
+- For inferential statistics (hypothesis testing, confidence intervals), use sample-based estimators
+- Document your methodological choices and why they're appropriate for the context
+
+Before finalizing calculations, verify your methodology matches the statistical context of the problem.
+
+reasoning: "Rather than specifying exact Python functions (which would overfit to this failure), I added general guidance about matching statistical methods to data context. The principle 'identify sample vs population' applies to many statistical tasks beyond z-scores. This guides the agent's thinking process rather than prescribing specific calculations."
+</example>
+
 ## Quality Checklist
 
 Before finalizing the optimized prompt, verify:
-- [ ] The proposed change is fully implemented
-- [ ] The justification's root cause is addressed
+- [ ] The proposed change is addressed at the right level of abstraction
+- [ ] Instructions are general enough to apply to 10+ different tasks
+- [ ] No library-specific function calls or exact procedures
+- [ ] The prompt guides HOW to think, not WHAT to calculate
+- [ ] The justification's root cause is addressed through principles, not rules
 - [ ] Instructions use positive framing where possible
-- [ ] XML tags organize distinct sections where helpful
-- [ ] Examples are included for non-trivial behaviors
 - [ ] The prompt is as concise as possible while remaining clear
+- [ ] Would NOT overfit if the agent encounters a similar but different problem
 """
