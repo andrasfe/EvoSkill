@@ -25,9 +25,24 @@ def _log(phase: str, message: str = "", indent: int = 0) -> None:
 
 
 def _score_multi_tolerance(predicted: str, ground_truth: str) -> float:
-    """Score answer using multiple tolerance levels and return average."""
-    scores = [score_answer(predicted, ground_truth, tol) for tol in TOLERANCE_LEVELS]
-    return sum(scores) / len(scores)
+    """Score answer using weighted average across tolerance levels.
+
+    Weights favor stricter tolerances: weight = 1 / (1 + 20 * tolerance)
+    This gives approximate weights:
+      - 0.0%  tolerance: 1.00 (exact match, highest priority)
+      - 1.0%  tolerance: 0.83
+      - 2.5%  tolerance: 0.67
+      - 5.0%  tolerance: 0.50
+      - 10.0% tolerance: 0.33
+    """
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for tol in TOLERANCE_LEVELS:
+        weight = 1.0 / (1.0 + 20.0 * tol)
+        score = score_answer(predicted, ground_truth, tol)
+        weighted_sum += weight * score
+        weight_total += weight
+    return weighted_sum / weight_total
 
 
 from src.agent_profiles.base_agent import get_base_agent_options
