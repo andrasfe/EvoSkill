@@ -1,5 +1,5 @@
 ---
-name: Brainstorming
+name: brainstorming
 description: IMMEDIATELY USE THIS SKILL when answering data analysis questions from treasury_bulletins_parsed - internal design thinking that identifies the question type, selects applicable skills, and converges on the best analytical approach before implementation
 ---
 
@@ -28,15 +28,14 @@ Review available skills and determine which apply:
 
 | Question Pattern | Required Skills |
 |-----------------|-----------------|
-| Any Treasury/fiscal data lookup | `treasury-data-local-first-protocol` (ALWAYS FIRST) |
-| Inflation adjustment, regression, trend | `economic-timeseries-analysis` |
-| ES, VaR, forecasting, currency conversion | `quantitative-analysis-methodology` |
-| Final numeric answer | `answer-output-normalizer` (ALWAYS LAST) |
+| Any Treasury/fiscal data lookup | `data-extraction-verification` (ALWAYS) |
+| Inflation adjustment, regression, trend | `data-extraction-verification` |
+| ES, VaR, forecasting, currency conversion | `data-extraction-verification` |
+| Final numeric answer | `data-extraction-verification` |
 
 **Skill chain reasoning:**
-- "This question asks for [X], which requires [skill A] because..."
-- "After getting raw data, I need [skill B] for [transformation]..."
-- "Final output needs [skill C] to ensure [format requirement]..."
+- "This question requires extracting [X] from Treasury data, applying data-extraction-verification protocol"
+- "For calculations, verify each intermediate value before proceeding"
 
 ### Phase 3: Approach Design
 
@@ -45,7 +44,7 @@ For the selected skills, map out the execution path:
 1. **Data retrieval**: Which treasury_bulletins_parsed files? What grep patterns?
 2. **Transformations**: Inflation adjustment? Return calculation? Currency conversion?
 3. **Analysis**: Regression? Risk metric? Ratio calculation?
-4. **Validation**: What checkpoints from quantitative-analysis-methodology apply?
+4. **Validation**: Apply data-extraction-verification at each extraction step
 5. **Output**: What format does the question expect?
 
 State assumptions explicitly:
@@ -63,9 +62,7 @@ Before execution, articulate the plan:
 **Question type:** [classification]
 
 **Skills to apply:**
-1. treasury-data-local-first-protocol → [specific purpose]
-2. [additional skills] → [specific purpose]
-3. answer-output-normalizer → [output format]
+1. data-extraction-verification → verify all extracted values
 
 **Data sources:** treasury_bulletins_parsed/[files]
 
@@ -81,29 +78,14 @@ Before execution, articulate the plan:
 
 ### Phase 5: Execute
 
-- Follow the skill chain in order
-- Apply validation checkpoints from quantitative-analysis-methodology
-- Format final output per answer-output-normalizer
-
-## Quick Reference: Skill Triggers
-
-| If question involves... | Trigger skill... |
-|------------------------|------------------|
-| Treasury, fiscal, budget, debt data | treasury-data-local-first-protocol |
-| CPI, inflation adjustment, real values | economic-timeseries-analysis |
-| Linear regression on time series | economic-timeseries-analysis |
-| ES, VaR, volatility | quantitative-analysis-methodology |
-| Bond price notation (32nds) | quantitative-analysis-methodology |
-| Exponential smoothing, forecasting | quantitative-analysis-methodology |
-| Currency conversion | quantitative-analysis-methodology |
-| Year-over-year ratios, growth rates | quantitative-analysis-methodology |
-| Any numeric answer | answer-output-normalizer |
+- Apply `data-extraction-verification` protocol for all data extraction
+- Verify each intermediate value before proceeding to calculations
+- Double-check final numeric output matches expected format
 
 ## Remember
 
 - This is internal reasoning - no questions, no waiting
-- ALWAYS start with treasury-data-local-first-protocol for data retrieval
-- ALWAYS end with answer-output-normalizer for final output
+- ALWAYS apply data-extraction-verification when extracting values from tables
 - State assumptions so errors are traceable
-- The goal is selecting the right skill chain, not documenting
+- The goal is selecting the right approach, not documenting
 - Once the plan is clear, execute immediately
