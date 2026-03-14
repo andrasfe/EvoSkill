@@ -289,11 +289,11 @@ def synthesize_skill_with_context(
             feedback, existing, embed_fn, similarity_threshold,
         )
         if matched is not None:
-            # Persist any newly-computed embeddings
-            store._save_skills(role, existing)
+            # Persist any newly-computed embeddings (without overwriting unrelated skills)
+            store._update_embeddings(role, existing)
             return None
         # Persist computed embeddings even when no match
-        store._save_skills(role, existing)
+        store._update_embeddings(role, existing)
 
     sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
     usr_tmpl = user_template or DEFAULT_USER_TEMPLATE
@@ -392,9 +392,9 @@ async def asynthesize_skill_with_context(
             feedback, existing, embed_fn, similarity_threshold,
         )
         if matched is not None:
-            store._save_skills(role, existing)
+            store._update_embeddings(role, existing)
             return None
-        store._save_skills(role, existing)
+        store._update_embeddings(role, existing)
 
     sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
     usr_tmpl = user_template or DEFAULT_USER_TEMPLATE
@@ -508,7 +508,7 @@ def synthesize_skill_batch(
 
     # Persist any newly-computed embeddings on pre-existing skills
     if deduplicate and embed_fn is not None and existing:
-        store._save_skills(role, existing)
+        store._update_embeddings(role, existing)
 
     return skills
 
@@ -583,6 +583,6 @@ async def asynthesize_skill_batch(
         existing.append(skill)
 
     if deduplicate and embed_fn is not None and existing:
-        store._save_skills(role, existing)
+        store._update_embeddings(role, existing)
 
     return skills
