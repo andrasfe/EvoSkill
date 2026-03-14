@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 import re
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from .backend import FileBackend, StorageBackend
 from .config import get_storage_path
 from .skill import Skill
+
+
+@dataclass
+class _RoleBuffer:
+    """Internal buffer configuration for a single role."""
+
+    items: list[dict[str, str]] = field(default_factory=list)
+    llm: Any = None
+    tags: list[str] | None = None
+    system_prompt: str | None = None
+    batch_size: int = 10
+    deduplicate: bool = True
+    similarity_threshold: float = 0.85
+    embed: Any = None
 
 _INJECTION_HEADER = "[EvoSkill] Learned skills for this role:"
 
@@ -33,6 +49,8 @@ class SkillStore:
         else:
             path = storage_path or get_storage_path()
             self._backend = FileBackend(path)
+        self._buffers: dict[str, _RoleBuffer] = {}
+        self._buffer_lock = threading.Lock()
 
     # -- read / query --------------------------------------------------------
 
@@ -425,6 +443,173 @@ class SkillStore:
             similarity_threshold=similarity_threshold,
             embed=embed,
         )
+
+    # -- buffering -----------------------------------------------------------
+
+    def _buffer_item(
+        self,
+        role: str,
+        item: dict[str, str],
+        *,
+        llm: Any = None,
+        tags: list[str] | None = None,
+        system_prompt: str | None = None,
+        batch_size: int = 10,
+        deduplicate: bool = True,
+        similarity_threshold: float = 0.85,
+        embed: Any = None,
+    ) -> list[Skill]:
+        """Add a feedback item to the internal buffer and auto-flush when full.
+
+        Returns any skills created by an auto-flush, or an empty list.
+        """
+        with self._buffer_lock:
+            if role not in self._buffers:
+                self._buffers[role] = _RoleBuffer(
+                    llm=llm, tags=tags, system_prompt=system_prompt,
+                    batch_size=batch_size, deduplicate=deduplicate,
+                    similarity_threshold=similarity_threshold, embed=embed,
+                )
+            buf = self._buffers[role]
+            buf.items.append(item)
+            if len(buf.items) >= buf.batch_size:
+                items_to_flush = buf.items[:]
+                buf.items.clear()
+            else:
+                return []
+
+        from .synthesizer import synthesize_skill_batch
+
+        return synthesize_skill_batch(
+            role=role,
+            items=items_to_flush,
+            store=self,
+            llm=buf.llm,
+            tags=buf.tags,
+            system_prompt=buf.system_prompt,
+            deduplicate=buf.deduplicate,
+            similarity_threshold=buf.similarity_threshold,
+            embed=buf.embed,
+        )
+
+    async def _abuffer_item(
+        self,
+        role: str,
+        item: dict[str, str],
+        *,
+        llm: Any = None,
+        tags: list[str] | None = None,
+        system_prompt: str | None = None,
+        batch_size: int = 10,
+        deduplicate: bool = True,
+        similarity_threshold: float = 0.85,
+        embed: Any = None,
+    ) -> list[Skill]:
+        """Async version of :meth:`_buffer_item`."""
+        with self._buffer_lock:
+            if role not in self._buffers:
+                self._buffers[role] = _RoleBuffer(
+                    llm=llm, tags=tags, system_prompt=system_prompt,
+                    batch_size=batch_size, deduplicate=deduplicate,
+                    similarity_threshold=similarity_threshold, embed=embed,
+                )
+            buf = self._buffers[role]
+            buf.items.append(item)
+            if len(buf.items) >= buf.batch_size:
+                items_to_flush = buf.items[:]
+                buf.items.clear()
+            else:
+                return []
+
+        from .synthesizer import asynthesize_skill_batch
+
+        return await asynthesize_skill_batch(
+            role=role,
+            items=items_to_flush,
+            store=self,
+            llm=buf.llm,
+            tags=buf.tags,
+            system_prompt=buf.system_prompt,
+            deduplicate=buf.deduplicate,
+            similarity_threshold=buf.similarity_threshold,
+            embed=buf.embed,
+        )
+
+    def flush(self, role: str | None = None) -> list[Skill]:
+        """Drain buffered items and synthesize skills via batch synthesis.
+
+        When *role* is ``None``, all buffered roles are flushed.
+        Returns all newly created skills.
+        """
+        from .synthesizer import synthesize_skill_batch
+
+        with self._buffer_lock:
+            if role is not None:
+                roles = [role] if role in self._buffers else []
+            else:
+                roles = list(self._buffers.keys())
+
+            to_flush: list[tuple[str, list[dict[str, str]], _RoleBuffer]] = []
+            for r in roles:
+                buf = self._buffers[r]
+                if buf.items:
+                    to_flush.append((r, buf.items[:], buf))
+                    buf.items.clear()
+
+        all_skills: list[Skill] = []
+        for r, items, buf in to_flush:
+            skills = synthesize_skill_batch(
+                role=r,
+                items=items,
+                store=self,
+                llm=buf.llm,
+                tags=buf.tags,
+                system_prompt=buf.system_prompt,
+                deduplicate=buf.deduplicate,
+                similarity_threshold=buf.similarity_threshold,
+                embed=buf.embed,
+            )
+            all_skills.extend(skills)
+        return all_skills
+
+    async def aflush(self, role: str | None = None) -> list[Skill]:
+        """Async version of :meth:`flush`."""
+        from .synthesizer import asynthesize_skill_batch
+
+        with self._buffer_lock:
+            if role is not None:
+                roles = [role] if role in self._buffers else []
+            else:
+                roles = list(self._buffers.keys())
+
+            to_flush: list[tuple[str, list[dict[str, str]], _RoleBuffer]] = []
+            for r in roles:
+                buf = self._buffers[r]
+                if buf.items:
+                    to_flush.append((r, buf.items[:], buf))
+                    buf.items.clear()
+
+        all_skills: list[Skill] = []
+        for r, items, buf in to_flush:
+            skills = await asynthesize_skill_batch(
+                role=r,
+                items=items,
+                store=self,
+                llm=buf.llm,
+                tags=buf.tags,
+                system_prompt=buf.system_prompt,
+                deduplicate=buf.deduplicate,
+                similarity_threshold=buf.similarity_threshold,
+                embed=buf.embed,
+            )
+            all_skills.extend(skills)
+        return all_skills
+
+    @property
+    def pending_buffer_count(self) -> int:
+        """Total number of items waiting in all buffers."""
+        with self._buffer_lock:
+            return sum(len(buf.items) for buf in self._buffers.values())
 
     # -- export / import -----------------------------------------------------
 

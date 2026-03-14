@@ -99,6 +99,7 @@ def evoskill(
     user_template: str | None = None,
     teach_role: str | None = None,
     is_method: bool | None = None,
+    batch_size: int = 10,
 ) -> Callable:
     """Decorator that adds runtime skill learning to any function/method.
 
@@ -148,6 +149,10 @@ def evoskill(
         When ``None`` (default), the decorator uses a heuristic (first
         param named ``self`` or ``cls``).  Set to ``True`` or ``False``
         to override.
+    batch_size:
+        Number of learning triggers to buffer before flushing via
+        :func:`synthesize_skill_batch`.  Defaults to ``10``.  Call
+        ``wrapper.flush()`` at end-of-run to drain remaining items.
     """
 
     if inject_skills is not None and inject_field is not None:
@@ -213,41 +218,78 @@ def evoskill(
                 return extract_output(result)
             return str(result)
 
+        def _buffer_kwargs() -> dict:
+            """Common kwargs for ``_buffer_item`` / ``_abuffer_item``."""
+            return dict(
+                llm=llm, tags=tags, system_prompt=system_prompt,
+                batch_size=batch_size,
+            )
+
         def _after_success(
             resolved_role: str, original_prompt: str, result: Any,
         ) -> None:
             if learn_when is not None and learn_when(original_prompt, result):
-                _learn_from_output(
-                    _learning_role(resolved_role), original_prompt,
-                    _extract_output_text(result), store, llm, tags,
-                    system_prompt, user_template,
-                )
+                output_text = _extract_output_text(result)
+                try:
+                    store._buffer_item(
+                        _learning_role(resolved_role),
+                        {"input_prompt": original_prompt,
+                         "agent_output": output_text,
+                         "reviewer_feedback": output_text},
+                        **_buffer_kwargs(),
+                    )
+                except Exception:
+                    pass
 
         def _after_failure(
             resolved_role: str, original_prompt: str, exc: Exception,
         ) -> None:
-            _learn_from_exception(
-                _learning_role(resolved_role), original_prompt, exc, store, llm, tags,
-                system_prompt, user_template,
+            failure_text = "\n".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__),
             )
+            try:
+                store._buffer_item(
+                    _learning_role(resolved_role),
+                    {"input_prompt": original_prompt,
+                     "agent_output": "(not captured)",
+                     "reviewer_feedback": failure_text},
+                    **_buffer_kwargs(),
+                )
+            except Exception:
+                pass
 
         async def _aafter_success(
             resolved_role: str, original_prompt: str, result: Any,
         ) -> None:
             if learn_when is not None and learn_when(original_prompt, result):
-                await _alearn_from_output(
-                    _learning_role(resolved_role), original_prompt,
-                    _extract_output_text(result), store, llm, tags,
-                    system_prompt, user_template,
-                )
+                output_text = _extract_output_text(result)
+                try:
+                    await store._abuffer_item(
+                        _learning_role(resolved_role),
+                        {"input_prompt": original_prompt,
+                         "agent_output": output_text,
+                         "reviewer_feedback": output_text},
+                        **_buffer_kwargs(),
+                    )
+                except Exception:
+                    pass
 
         async def _aafter_failure(
             resolved_role: str, original_prompt: str, exc: Exception,
         ) -> None:
-            await _alearn_from_exception(
-                _learning_role(resolved_role), original_prompt, exc, store, llm, tags,
-                system_prompt, user_template,
+            failure_text = "\n".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__),
             )
+            try:
+                await store._abuffer_item(
+                    _learning_role(resolved_role),
+                    {"input_prompt": original_prompt,
+                     "agent_output": "(not captured)",
+                     "reviewer_feedback": failure_text},
+                    **_buffer_kwargs(),
+                )
+            except Exception:
+                pass
 
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -277,6 +319,10 @@ def evoskill(
 
         wrapper = async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
         wrapper._evoskill_store = store  # type: ignore[attr-defined]
+        if asyncio.iscoroutinefunction(func):
+            wrapper.flush = store.aflush  # type: ignore[attr-defined]
+        else:
+            wrapper.flush = store.flush  # type: ignore[attr-defined]
         return wrapper
 
     return decorator
