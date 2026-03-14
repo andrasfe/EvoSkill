@@ -1,29 +1,34 @@
-# Python-generated files
+# Python
 __pycache__/
-*.py[oc]
-build/
+*.py[cod]
+*.egg-info/
 dist/
-wheels/
-*.egg-info
-treasury_bulletins_parsed/
-*.skill
-*.log
-# Claude Code config (ignore most, but track program state)
-.claude/*
-!.claude/program.yaml
-!.claude/skills/
-results/
-DABstep-data/
+build/
+*.egg
 
 # Virtual environments
-.venv
-.env
-.DS_Store
-.dataset/
+.venv/
+venv/
+env/
 
-# Cache
-.cache/
-*.txt
-output.txt
-tests/
-scratch/
+# dotenv
+.env
+
+# Skill storage (default paths)
+evoskill_data/
+skills/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
