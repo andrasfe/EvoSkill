@@ -21,6 +21,7 @@ class _RoleBuffer:
     llm: Any = None
     tags: list[str] | None = None
     system_prompt: str | None = None
+    user_template: str | None = None
     batch_size: int = 10
     deduplicate: bool = True
     similarity_threshold: float = 0.85
@@ -454,6 +455,7 @@ class SkillStore:
         llm: Any = None,
         tags: list[str] | None = None,
         system_prompt: str | None = None,
+        user_template: str | None = None,
         batch_size: int = 10,
         deduplicate: bool = True,
         similarity_threshold: float = 0.85,
@@ -467,6 +469,7 @@ class SkillStore:
             if role not in self._buffers:
                 self._buffers[role] = _RoleBuffer(
                     llm=llm, tags=tags, system_prompt=system_prompt,
+                    user_template=user_template,
                     batch_size=batch_size, deduplicate=deduplicate,
                     similarity_threshold=similarity_threshold, embed=embed,
                 )
@@ -487,6 +490,7 @@ class SkillStore:
             llm=buf.llm,
             tags=buf.tags,
             system_prompt=buf.system_prompt,
+            user_template=buf.user_template,
             deduplicate=buf.deduplicate,
             similarity_threshold=buf.similarity_threshold,
             embed=buf.embed,
@@ -500,6 +504,7 @@ class SkillStore:
         llm: Any = None,
         tags: list[str] | None = None,
         system_prompt: str | None = None,
+        user_template: str | None = None,
         batch_size: int = 10,
         deduplicate: bool = True,
         similarity_threshold: float = 0.85,
@@ -510,6 +515,7 @@ class SkillStore:
             if role not in self._buffers:
                 self._buffers[role] = _RoleBuffer(
                     llm=llm, tags=tags, system_prompt=system_prompt,
+                    user_template=user_template,
                     batch_size=batch_size, deduplicate=deduplicate,
                     similarity_threshold=similarity_threshold, embed=embed,
                 )
@@ -530,6 +536,7 @@ class SkillStore:
             llm=buf.llm,
             tags=buf.tags,
             system_prompt=buf.system_prompt,
+            user_template=buf.user_template,
             deduplicate=buf.deduplicate,
             similarity_threshold=buf.similarity_threshold,
             embed=buf.embed,
@@ -565,6 +572,7 @@ class SkillStore:
                 llm=buf.llm,
                 tags=buf.tags,
                 system_prompt=buf.system_prompt,
+                user_template=buf.user_template,
                 deduplicate=buf.deduplicate,
                 similarity_threshold=buf.similarity_threshold,
                 embed=buf.embed,
@@ -598,6 +606,7 @@ class SkillStore:
                 llm=buf.llm,
                 tags=buf.tags,
                 system_prompt=buf.system_prompt,
+                user_template=buf.user_template,
                 deduplicate=buf.deduplicate,
                 similarity_threshold=buf.similarity_threshold,
                 embed=buf.embed,

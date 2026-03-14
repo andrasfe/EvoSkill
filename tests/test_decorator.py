@@ -819,6 +819,22 @@ class TestBatchSizeAndFlush:
         mock_batch.assert_called_once()
         assert mock_batch.call_args.kwargs.get("system_prompt") == "Be terse."
 
+    @patch("evoskill.synthesizer.synthesize_skill_batch")
+    def test_user_template_propagates_to_batch(self, mock_batch, tmp_path: Path) -> None:
+        mock_batch.return_value = []
+
+        @evoskill(role="dev", user_template="Custom: {role} {items_text} {existing_skills}", batch_size=2)
+        def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                agent("test")
+
+        mock_batch.assert_called_once()
+        assert mock_batch.call_args.kwargs.get("user_template") == "Custom: {role} {items_text} {existing_skills}"
+
     def test_wrapper_has_flush_attribute(self, tmp_path: Path) -> None:
         @evoskill(role="dev")
         def sync_agent(prompt: str) -> str:

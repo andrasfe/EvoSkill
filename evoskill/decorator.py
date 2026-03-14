@@ -222,7 +222,7 @@ def evoskill(
             """Common kwargs for ``_buffer_item`` / ``_abuffer_item``."""
             return dict(
                 llm=llm, tags=tags, system_prompt=system_prompt,
-                batch_size=batch_size,
+                user_template=user_template, batch_size=batch_size,
             )
 
         def _after_success(
