@@ -97,9 +97,39 @@ class SkillStore:
 
         Used internally to flush back skills whose embeddings were
         computed during a deduplication check.
+
+        .. warning:: This overwrites **all** skills for *role*.  Prefer
+           :meth:`_update_embeddings` when you only need to persist
+           newly-computed embeddings from a filtered subset.
         """
         with self._backend.lock(role):
             self._backend.write(role, skills)
+
+    def _update_embeddings(self, role: str, skills_with_embeddings: list[Skill]) -> None:
+        """Merge cached embeddings back into the full (unfiltered) skill list.
+
+        Reads **all** skills for *role* from the backend, updates the
+        ``embedding`` field on any skill whose ``content`` matches one
+        of the provided *skills_with_embeddings*, and writes the full
+        list back.  This avoids the data-loss problem of overwriting
+        all skills with a tag/enabled-filtered subset.
+        """
+        embedding_map: dict[str, list[float]] = {
+            s.content: s.embedding
+            for s in skills_with_embeddings
+            if s.embedding is not None
+        }
+        if not embedding_map:
+            return
+        with self._backend.lock(role):
+            all_skills = self._backend.read(role)
+            changed = False
+            for s in all_skills:
+                if s.embedding is None and s.content in embedding_map:
+                    s.embedding = embedding_map[s.content]
+                    changed = True
+            if changed:
+                self._backend.write(role, all_skills)
 
     def add_manual_skill(
         self,

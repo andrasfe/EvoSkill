@@ -826,3 +826,146 @@ class TestEmbeddingCaching:
         skill = Skill(role="dev", content="test", source="learned")
         d = skill.to_dict()
         assert "embedding" not in d
+
+
+# ---------------------------------------------------------------------------
+# Regression: _update_embeddings preserves unfiltered skills
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateEmbeddingsNoDataLoss:
+    """Verify that dedup embedding persistence does NOT overwrite skills
+    with different tags, disabled skills, or skills from concurrent writes."""
+
+    def test_dedup_preserves_skills_with_different_tags(self, store: SkillStore) -> None:
+        """synthesize_skill_with_context with tags=["finance"] must not
+        delete existing skills tagged ["marketing"]."""
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="writer", content="marketing tip", source="learned", tags=["marketing"]))
+        store.add_skill(Skill(role="writer", content="finance tip", source="learned", tags=["finance"]))
+
+        result = synthesize_skill_with_context(
+            role="writer",
+            input_prompt="write report",
+            agent_output="draft",
+            feedback="finance tip",  # will match via _identical_embed
+            store=store,
+            llm=lambda msgs: "should not be called",
+            tags=["finance"],
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_identical_embed,
+        )
+        assert result is None  # dedup matched
+
+        # The marketing skill must still exist
+        all_skills = store.get_skills("writer", tags=["marketing"])
+        assert len(all_skills) == 1
+        assert all_skills[0].content == "marketing tip"
+
+        # Finance skill also still there
+        finance_skills = store.get_skills("writer", tags=["finance"])
+        assert len(finance_skills) == 1
+
+    def test_dedup_preserves_disabled_skills(self, store: SkillStore) -> None:
+        """Disabled skills must not be deleted when dedup persists embeddings."""
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="active skill", source="learned"))
+        store.add_skill(Skill(role="dev", content="disabled skill", source="learned"))
+        store.disable_skill("dev", "disabled skill")
+
+        result = synthesize_skill_with_context(
+            role="dev",
+            input_prompt="code",
+            agent_output="output",
+            feedback="active skill",
+            store=store,
+            llm=lambda msgs: "should not be called",
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_identical_embed,
+        )
+        assert result is None
+
+        # Disabled skill must still be in the store
+        all_skills = store.get_skills("dev", enabled_only=False)
+        disabled = [s for s in all_skills if s.content == "disabled skill"]
+        assert len(disabled) == 1
+        assert not disabled[0].enabled
+
+    def test_async_dedup_preserves_other_tags(self, store: SkillStore) -> None:
+        """Async variant must also not lose skills with different tags."""
+        import asyncio
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="writer", content="seo tip", source="learned", tags=["seo"]))
+        store.add_skill(Skill(role="writer", content="tone tip", source="learned", tags=["tone"]))
+
+        async def run() -> Skill | None:
+            return await asynthesize_skill_with_context(
+                role="writer",
+                input_prompt="write",
+                agent_output="draft",
+                feedback="tone tip",
+                store=store,
+                llm=lambda msgs: "should not be called",
+                tags=["tone"],
+                deduplicate=True,
+                similarity_threshold=0.01,
+                embed=_identical_embed,
+            )
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result is None
+
+        seo_skills = store.get_skills("writer", tags=["seo"])
+        assert len(seo_skills) == 1
+        assert seo_skills[0].content == "seo tip"
+
+    def test_batch_dedup_preserves_other_tags(self, store: SkillStore) -> None:
+        """synthesize_skill_batch must not delete skills with different tags
+        when persisting embeddings."""
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="python tip", source="learned", tags=["python"]))
+        store.add_skill(Skill(role="dev", content="rust tip", source="learned", tags=["rust"]))
+
+        def fake_llm(msgs: list[dict[str, str]]) -> str:
+            return "1. New python skill."
+
+        skills = synthesize_skill_batch(
+            role="dev",
+            items=[{"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"}],
+            store=store,
+            llm=fake_llm,
+            tags=["python"],
+            deduplicate=True,
+            embed=_fake_embed,
+        )
+        assert len(skills) == 1
+
+        # Rust skills must still be there
+        rust_skills = store.get_skills("dev", tags=["rust"])
+        assert len(rust_skills) == 1
+        assert rust_skills[0].content == "rust tip"
+
+    def test_update_embeddings_merges_correctly(self, store: SkillStore) -> None:
+        """_update_embeddings should only set embeddings on matching skills."""
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="skill A", source="learned"))
+        store.add_skill(Skill(role="dev", content="skill B", source="learned"))
+
+        # Simulate: we computed an embedding for skill A only
+        skills_with_emb = [
+            Skill(role="dev", content="skill A", source="learned", embedding=[1.0, 0.0]),
+        ]
+        store._update_embeddings("dev", skills_with_emb)
+
+        all_skills = store.get_skills("dev")
+        a = [s for s in all_skills if s.content == "skill A"][0]
+        b = [s for s in all_skills if s.content == "skill B"][0]
+        assert a.embedding == [1.0, 0.0]
+        assert b.embedding is None
