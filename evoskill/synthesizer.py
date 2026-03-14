@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Awaitable, Callable, Union
 
 from .config import get_api_key, get_model
 from .skill import Skill
@@ -68,6 +68,9 @@ def default_openai_llm(
 
 LLMCallable = Callable[[list[dict[str, str]]], str]
 """Type alias: ``(messages) -> str``."""
+
+AsyncLLMCallable = Callable[[list[dict[str, str]]], Awaitable[str]]
+"""Type alias: ``async (messages) -> str``."""
 
 
 def synthesize_skill(
@@ -146,6 +149,76 @@ def synthesize_skill_with_context(
 
     llm_fn = llm or default_openai_llm
     content = llm_fn(messages).strip()
+
+    skill = Skill(
+        role=role, content=content, source="learned", tags=tags or [],
+    )
+    store.add_skill(skill)
+    return skill
+
+
+async def asynthesize_skill(
+    role: str,
+    input_prompt: str,
+    failure: str,
+    store: SkillStore,
+    *,
+    llm: AsyncLLMCallable | None = None,
+    tags: list[str] | None = None,
+) -> Skill:
+    """Async version of :func:`synthesize_skill`."""
+    return await asynthesize_skill_with_context(
+        role=role,
+        input_prompt=input_prompt,
+        agent_output="(not captured)",
+        feedback=failure,
+        store=store,
+        llm=llm,
+        tags=tags,
+    )
+
+
+async def asynthesize_skill_with_context(
+    role: str,
+    input_prompt: str,
+    agent_output: str,
+    feedback: str,
+    store: SkillStore,
+    *,
+    llm: AsyncLLMCallable | None = None,
+    tags: list[str] | None = None,
+) -> Skill:
+    """Async version of :func:`synthesize_skill_with_context`.
+
+    Parameters
+    ----------
+    llm:
+        Async LLM callable ``async (messages) -> str``.  Falls back to the
+        built-in OpenAI adapter (wrapped in a sync-to-async shim) when ``None``.
+    """
+    existing = store.get_skills(role)
+    existing_text = (
+        "\n".join(f"- {s.content}" for s in existing) if existing else "(none)"
+    )
+
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": _USER_TEMPLATE.format(
+                role=role,
+                input_prompt=input_prompt,
+                agent_output=agent_output,
+                feedback=feedback,
+                existing_skills=existing_text,
+            ),
+        },
+    ]
+
+    if llm is not None:
+        content = (await llm(messages)).strip()
+    else:
+        content = default_openai_llm(messages).strip()
 
     skill = Skill(
         role=role, content=content, source="learned", tags=tags or [],

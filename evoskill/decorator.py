@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from .skill import Skill
 from .store import SkillStore
-from .synthesizer import LLMCallable, synthesize_skill
+from .synthesizer import AsyncLLMCallable, LLMCallable, asynthesize_skill, synthesize_skill
 
 _INJECTION_HEADER = "[EvoSkill] Learned skills for this role:"
 
@@ -55,7 +55,7 @@ def evoskill(
     learn_when: Callable[..., bool] | None = None,
     skills: list[str] | None = None,
     inject_skills: Callable[[tuple, dict, str], tuple[tuple, dict]] | None = None,
-    llm: LLMCallable | None = None,
+    llm: LLMCallable | AsyncLLMCallable | None = None,
     tags: list[str] | None = None,
     max_skills: int | None = None,
 ) -> Callable:
@@ -140,6 +140,21 @@ def evoskill(
                 resolved_role, original_prompt, exc, store, llm, tags,
             )
 
+        async def _aafter_success(
+            resolved_role: str, original_prompt: str, result: Any,
+        ) -> None:
+            if learn_when is not None and learn_when(original_prompt, result):
+                await _alearn_from_output(
+                    resolved_role, original_prompt, result, store, llm, tags,
+                )
+
+        async def _aafter_failure(
+            resolved_role: str, original_prompt: str, exc: Exception,
+        ) -> None:
+            await _alearn_from_exception(
+                resolved_role, original_prompt, exc, store, llm, tags,
+            )
+
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             resolved_role, new_args, new_kwargs, original_prompt = _prepare(
@@ -148,9 +163,9 @@ def evoskill(
             try:
                 result = await func(*new_args, **new_kwargs)
             except Exception as exc:
-                _after_failure(resolved_role, original_prompt, exc)
+                await _aafter_failure(resolved_role, original_prompt, exc)
                 raise
-            _after_success(resolved_role, original_prompt, result)
+            await _aafter_success(resolved_role, original_prompt, result)
             return result
 
         @functools.wraps(func)
@@ -224,5 +239,35 @@ def _learn_from_output(
 ) -> None:
     try:
         synthesize_skill(role, prompt, str(output), store, llm=llm, tags=skill_tags)
+    except Exception:
+        pass
+
+
+async def _alearn_from_exception(
+    role: str,
+    prompt: str,
+    exc: Exception,
+    store: SkillStore,
+    llm: AsyncLLMCallable | LLMCallable | None,
+    skill_tags: list[str] | None,
+) -> None:
+    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    failure_text = "".join(tb)
+    try:
+        await asynthesize_skill(role, prompt, failure_text, store, llm=llm, tags=skill_tags)
+    except Exception:
+        pass
+
+
+async def _alearn_from_output(
+    role: str,
+    prompt: str,
+    output: Any,
+    store: SkillStore,
+    llm: AsyncLLMCallable | LLMCallable | None,
+    skill_tags: list[str] | None,
+) -> None:
+    try:
+        await asynthesize_skill(role, prompt, str(output), store, llm=llm, tags=skill_tags)
     except Exception:
         pass

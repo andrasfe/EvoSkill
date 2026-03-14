@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from filelock import FileLock
 
@@ -188,6 +188,32 @@ class SkillStore:
         from .synthesizer import synthesize_skill_with_context
 
         return synthesize_skill_with_context(
+            role=role,
+            input_prompt=input_prompt,
+            agent_output=agent_output,
+            feedback=reviewer_feedback,
+            store=self,
+            llm=llm,
+            tags=tags,
+        )
+
+    async def alearn_from_feedback(
+        self,
+        role: str,
+        llm: Callable[[list[dict[str, str]]], Awaitable[str]],
+        *,
+        input_prompt: str,
+        agent_output: str,
+        reviewer_feedback: str,
+        tags: list[str] | None = None,
+    ) -> Skill:
+        """Async version of :meth:`learn_from_feedback`.
+
+        *llm* is an async callable ``async (messages) -> str``.
+        """
+        from .synthesizer import asynthesize_skill_with_context
+
+        return await asynthesize_skill_with_context(
             role=role,
             input_prompt=input_prompt,
             agent_output=agent_output,

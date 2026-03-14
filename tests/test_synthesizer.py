@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from evoskill.store import SkillStore
-from evoskill.synthesizer import synthesize_skill, synthesize_skill_with_context
+from evoskill.synthesizer import (
+    asynthesize_skill,
+    asynthesize_skill_with_context,
+    synthesize_skill,
+    synthesize_skill_with_context,
+)
 
 
 @pytest.fixture()
@@ -149,3 +154,78 @@ class TestSynthesizeSkillWithContext:
         assert "too cliché" in user_msg
         assert skill.content == "Contextual skill"
         assert skill.role == "writer"
+
+
+class TestAsynthesizeSkill:
+    """Tests for the async synthesis entry points."""
+
+    @pytest.mark.asyncio
+    async def test_async_custom_llm_is_called(self, store: SkillStore) -> None:
+        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+            return "Async custom skill."
+
+        skill = await asynthesize_skill(
+            role="analyst",
+            input_prompt="parse this",
+            failure="error",
+            store=store,
+            llm=my_async_llm,
+        )
+        assert skill.content == "Async custom skill."
+        assert skill.source == "learned"
+        assert len(store.get_skills("analyst")) == 1
+
+    @pytest.mark.asyncio
+    async def test_async_with_context(self, store: SkillStore) -> None:
+        captured: list = []
+
+        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+            captured.extend(messages)
+            return "Async contextual skill"
+
+        skill = await asynthesize_skill_with_context(
+            role="writer",
+            input_prompt="write an essay",
+            agent_output="draft text",
+            feedback="needs more detail",
+            store=store,
+            llm=my_async_llm,
+        )
+
+        user_msg = captured[1]["content"]
+        assert "write an essay" in user_msg
+        assert "draft text" in user_msg
+        assert "needs more detail" in user_msg
+        assert skill.content == "Async contextual skill"
+
+    @pytest.mark.asyncio
+    async def test_async_tags_attached(self, store: SkillStore) -> None:
+        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+            return "Tagged async skill"
+
+        skill = await asynthesize_skill(
+            role="analyst",
+            input_prompt="x",
+            failure="y",
+            store=store,
+            llm=my_async_llm,
+            tags=["async", "test"],
+        )
+        assert skill.tags == ["async", "test"]
+
+    @pytest.mark.asyncio
+    async def test_async_fallback_to_sync_default(
+        self, store: SkillStore,
+    ) -> None:
+        """When no llm is provided, falls back to the sync default_openai_llm."""
+        with patch(
+            "evoskill.synthesizer.default_openai_llm",
+            return_value="Fallback skill",
+        ):
+            skill = await asynthesize_skill(
+                role="analyst",
+                input_prompt="x",
+                failure="y",
+                store=store,
+            )
+        assert skill.content == "Fallback skill"

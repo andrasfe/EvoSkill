@@ -137,10 +137,16 @@ class TestAsyncWrapping:
         result = asyncio.get_event_loop().run_until_complete(agent("query"))
         assert "check nulls" in result
 
-    @patch("evoskill.decorator.synthesize_skill")
+    @patch("evoskill.decorator.asynthesize_skill")
     def test_async_exception_triggers_learning(
-        self, mock_synth: MagicMock, tmp_path: Path
+        self, mock_asynth: MagicMock, tmp_path: Path
     ) -> None:
+        # Make the mock return a coroutine
+        async def _noop(*a, **kw):
+            return MagicMock()
+
+        mock_asynth.side_effect = _noop
+
         @evoskill(role="dev")
         async def agent(prompt: str) -> str:
             raise RuntimeError("oops")
@@ -150,7 +156,43 @@ class TestAsyncWrapping:
         with pytest.raises(RuntimeError, match="oops"):
             asyncio.get_event_loop().run_until_complete(agent("fix this"))
 
-        mock_synth.assert_called_once()
+        mock_asynth.assert_called_once()
+
+    @patch("evoskill.decorator.asynthesize_skill")
+    def test_async_learn_when_uses_async_synthesis(
+        self, mock_asynth: MagicMock, tmp_path: Path
+    ) -> None:
+        async def _noop(*a, **kw):
+            return MagicMock()
+
+        mock_asynth.side_effect = _noop
+
+        def should_learn(inp: str, out: str) -> bool:
+            return "bad" in out
+
+        @evoskill(role="dev", learn_when=should_learn)
+        async def agent(prompt: str) -> str:
+            return "bad output"
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+
+        asyncio.get_event_loop().run_until_complete(agent("test"))
+        mock_asynth.assert_called_once()
+
+    def test_async_with_async_llm(self, tmp_path: Path) -> None:
+        """Async decorator passes async LLM through to synthesis."""
+
+        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+            return "async skill"
+
+        @evoskill(role="dev", llm=my_async_llm)
+        async def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+
+        result = asyncio.get_event_loop().run_until_complete(agent("hello"))
+        assert "hello" in result
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +275,7 @@ class TestInjectSkills:
 
 class TestBYOLLM:
     @patch("evoskill.decorator.synthesize_skill")
-    def test_llm_passed_to_synthesizer(
+    def test_sync_llm_passed_to_synthesizer(
         self, mock_synth: MagicMock, tmp_path: Path
     ) -> None:
         def my_llm(messages: list[dict[str, str]]) -> str:
@@ -249,8 +291,31 @@ class TestBYOLLM:
             agent("test")
 
         mock_synth.assert_called_once()
-        # Check that llm kwarg was passed through
         assert mock_synth.call_args.kwargs["llm"] is my_llm
+
+    @patch("evoskill.decorator.asynthesize_skill")
+    def test_async_llm_passed_to_async_synthesizer(
+        self, mock_asynth: MagicMock, tmp_path: Path
+    ) -> None:
+        async def _noop(*a, **kw):
+            return MagicMock()
+
+        mock_asynth.side_effect = _noop
+
+        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+            return "async custom skill"
+
+        @evoskill(role="dev", llm=my_async_llm)
+        async def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+
+        with pytest.raises(ValueError):
+            asyncio.get_event_loop().run_until_complete(agent("test"))
+
+        mock_asynth.assert_called_once()
+        assert mock_asynth.call_args.kwargs["llm"] is my_async_llm
 
 
 # ---------------------------------------------------------------------------

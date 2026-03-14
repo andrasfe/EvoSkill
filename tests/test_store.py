@@ -194,3 +194,40 @@ class TestLearnFromFeedback:
             tags=["review", "writing"],
         )
         assert skill.tags == ["review", "writing"]
+
+
+class TestAlearnFromFeedback:
+    @pytest.mark.asyncio
+    async def test_async_learn_from_feedback(self, store: SkillStore) -> None:
+        async def fake_async_llm(messages: list[dict[str, str]]) -> str:
+            user_msg = messages[1]["content"]
+            assert "async input" in user_msg
+            assert "async output" in user_msg
+            assert "async feedback" in user_msg
+            return "Async feedback skill."
+
+        skill = await store.alearn_from_feedback(
+            role="writer",
+            llm=fake_async_llm,
+            input_prompt="async input",
+            agent_output="async output",
+            reviewer_feedback="async feedback",
+        )
+        assert skill.content == "Async feedback skill."
+        assert skill.source == "learned"
+        assert len(store.get_skills("writer")) == 1
+
+    @pytest.mark.asyncio
+    async def test_async_learn_from_feedback_with_tags(self, store: SkillStore) -> None:
+        async def fake_async_llm(messages: list[dict[str, str]]) -> str:
+            return "Async tagged skill."
+
+        skill = await store.alearn_from_feedback(
+            role="writer",
+            llm=fake_async_llm,
+            input_prompt="input",
+            agent_output="output",
+            reviewer_feedback="feedback",
+            tags=["async", "review"],
+        )
+        assert skill.tags == ["async", "review"]
