@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,8 +18,11 @@ from evoskill.synthesizer import (
     synthesize_skill_with_context,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-@pytest.fixture()
+
+@pytest.fixture
 def store(tmp_path: Path) -> SkillStore:
     return SkillStore(storage_path=tmp_path)
 
@@ -450,8 +453,8 @@ class TestCosineHelpers:
 
 class TestFindDuplicate:
     def test_returns_match_above_threshold(self, store: SkillStore) -> None:
-        from evoskill.synthesizer import _find_duplicate
         from evoskill.skill import Skill
+        from evoskill.synthesizer import _find_duplicate
 
         existing = [Skill(role="dev", content="test", source="learned")]
         # _identical_embed makes everything sim=1.0
@@ -460,16 +463,16 @@ class TestFindDuplicate:
         assert result.content == "test"
 
     def test_returns_none_below_threshold(self, store: SkillStore) -> None:
-        from evoskill.synthesizer import _find_duplicate
         from evoskill.skill import Skill
+        from evoskill.synthesizer import _find_duplicate
 
         existing = [Skill(role="dev", content="test", source="learned")]
         result = _find_duplicate("feedback", existing, _fake_embed, 0.9999)
         assert result is None
 
     def test_caches_embeddings_on_skills(self) -> None:
-        from evoskill.synthesizer import _find_duplicate
         from evoskill.skill import Skill
+        from evoskill.synthesizer import _find_duplicate
 
         skill = Skill(role="dev", content="test skill", source="learned")
         assert skill.embedding is None
@@ -478,10 +481,10 @@ class TestFindDuplicate:
         assert isinstance(skill.embedding, list)
 
     def test_reuses_cached_embedding(self) -> None:
-        from evoskill.synthesizer import _find_duplicate
         from evoskill.skill import Skill
+        from evoskill.synthesizer import _find_duplicate
 
-        cached = [0.5, 0.5, 0.5, 0.5]
+        cached = _fake_embed("cached-placeholder")
         skill = Skill(
             role="dev", content="test", source="learned", embedding=cached,
         )
@@ -897,6 +900,7 @@ class TestUpdateEmbeddingsNoDataLoss:
     def test_async_dedup_preserves_other_tags(self, store: SkillStore) -> None:
         """Async variant must also not lose skills with different tags."""
         import asyncio
+
         from evoskill.skill import Skill
 
         store.add_skill(Skill(role="writer", content="seo tip", source="learned", tags=["seo"]))
@@ -964,7 +968,7 @@ class TestUpdateEmbeddingsNoDataLoss:
         store._update_embeddings("dev", skills_with_emb)
 
         all_skills = store.get_skills("dev")
-        a = [s for s in all_skills if s.content == "skill A"][0]
-        b = [s for s in all_skills if s.content == "skill B"][0]
+        a = next(s for s in all_skills if s.content == "skill A")
+        b = next(s for s in all_skills if s.content == "skill B")
         assert a.embedding == [1.0, 0.0]
         assert b.embedding is None

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from filelock import FileLock
 
 from .skill import Skill
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @runtime_checkable

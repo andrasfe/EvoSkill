@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 import re
-from typing import TYPE_CHECKING, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from .config import get_api_key, get_model
 from .skill import Skill
@@ -110,7 +111,7 @@ def default_openai_embedding(text: str) -> list[float]:
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0.0 or norm_b == 0.0:
@@ -209,7 +210,7 @@ def synthesize_skill(
     role: str,
     input_prompt: str,
     failure: str,
-    store: "SkillStore",
+    store: SkillStore,
     *,
     llm: LLMCallable | None = None,
     tags: list[str] | None = None,
@@ -248,7 +249,7 @@ def synthesize_skill_with_context(
     input_prompt: str,
     agent_output: str,
     feedback: str,
-    store: "SkillStore",
+    store: SkillStore,
     *,
     llm: LLMCallable | None = None,
     tags: list[str] | None = None,
@@ -340,7 +341,7 @@ async def asynthesize_skill(
     role: str,
     input_prompt: str,
     failure: str,
-    store: "SkillStore",
+    store: SkillStore,
     *,
     llm: AsyncLLMCallable | None = None,
     tags: list[str] | None = None,
@@ -372,7 +373,7 @@ async def asynthesize_skill_with_context(
     input_prompt: str,
     agent_output: str,
     feedback: str,
-    store: "SkillStore",
+    store: SkillStore,
     *,
     llm: AsyncLLMCallable | None = None,
     tags: list[str] | None = None,
@@ -448,7 +449,7 @@ async def asynthesize_skill_with_context(
 def synthesize_skill_batch(
     role: str,
     items: list[dict[str, str]],
-    store: "SkillStore",
+    store: SkillStore,
     *,
     llm: LLMCallable | None = None,
     tags: list[str] | None = None,
@@ -521,7 +522,7 @@ def synthesize_skill_batch(
 async def asynthesize_skill_batch(
     role: str,
     items: list[dict[str, str]],
-    store: "SkillStore",
+    store: SkillStore,
     *,
     llm: AsyncLLMCallable | None = None,
     tags: list[str] | None = None,
@@ -553,10 +554,7 @@ async def asynthesize_skill_batch(
         },
     ]
 
-    if llm is not None:
-        raw = (await llm(messages)).strip()
-    else:
-        raw = default_openai_llm(messages).strip()
+    raw = (await llm(messages)).strip() if llm is not None else default_openai_llm(messages).strip()
 
     contents = _parse_numbered_list(raw)
 
