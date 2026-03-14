@@ -92,6 +92,15 @@ class SkillStore:
             skills.append(skill)
             self._backend.write(skill.role, skills)
 
+    def _save_skills(self, role: str, skills: list[Skill]) -> None:
+        """Persist *skills* for *role*, overwriting existing data.
+
+        Used internally to flush back skills whose embeddings were
+        computed during a deduplication check.
+        """
+        with self._backend.lock(role):
+            self._backend.write(role, skills)
+
     def add_manual_skill(
         self,
         role: str,
@@ -265,8 +274,15 @@ class SkillStore:
         tags: list[str] | None = None,
         system_prompt: str | None = None,
         user_template: str | None = None,
-    ) -> Skill:
-        """Synthesize a skill from another agent's structured feedback."""
+        deduplicate: bool = True,
+        similarity_threshold: float = 0.85,
+        embed: Callable[[str], list[float]] | None = None,
+    ) -> Skill | None:
+        """Synthesize a skill from another agent's structured feedback.
+
+        Returns ``None`` when *deduplicate* is ``True`` and an existing skill
+        already covers the feedback.
+        """
         from .synthesizer import synthesize_skill_with_context
 
         return synthesize_skill_with_context(
@@ -279,6 +295,9 @@ class SkillStore:
             tags=tags,
             system_prompt=system_prompt,
             user_template=user_template,
+            deduplicate=deduplicate,
+            similarity_threshold=similarity_threshold,
+            embed=embed,
         )
 
     async def alearn_from_feedback(
@@ -292,7 +311,10 @@ class SkillStore:
         tags: list[str] | None = None,
         system_prompt: str | None = None,
         user_template: str | None = None,
-    ) -> Skill:
+        deduplicate: bool = True,
+        similarity_threshold: float = 0.85,
+        embed: Callable | None = None,
+    ) -> Skill | None:
         """Async version of :meth:`learn_from_feedback`."""
         from .synthesizer import asynthesize_skill_with_context
 
@@ -306,6 +328,9 @@ class SkillStore:
             tags=tags,
             system_prompt=system_prompt,
             user_template=user_template,
+            deduplicate=deduplicate,
+            similarity_threshold=similarity_threshold,
+            embed=embed,
         )
 
     # -- batch feedback ------------------------------------------------------
@@ -318,11 +343,17 @@ class SkillStore:
         items: list[dict[str, str]],
         tags: list[str] | None = None,
         system_prompt: str | None = None,
+        deduplicate: bool = True,
+        similarity_threshold: float = 0.85,
+        embed: Callable[[str], list[float]] | None = None,
     ) -> list[Skill]:
         """Synthesize multiple skills from a batch of feedback items in one LLM call.
 
         *items* is a list of dicts, each with keys:
         ``input_prompt``, ``agent_output``, ``reviewer_feedback``.
+
+        When *deduplicate* is ``True``, synthesized skills that are too similar
+        to existing skills are silently dropped.
         """
         from .synthesizer import synthesize_skill_batch
 
@@ -333,6 +364,9 @@ class SkillStore:
             llm=llm,
             tags=tags,
             system_prompt=system_prompt,
+            deduplicate=deduplicate,
+            similarity_threshold=similarity_threshold,
+            embed=embed,
         )
 
     async def alearn_from_feedback_batch(
@@ -343,6 +377,9 @@ class SkillStore:
         items: list[dict[str, str]],
         tags: list[str] | None = None,
         system_prompt: str | None = None,
+        deduplicate: bool = True,
+        similarity_threshold: float = 0.85,
+        embed: Callable | None = None,
     ) -> list[Skill]:
         """Async version of :meth:`learn_from_feedback_batch`."""
         from .synthesizer import asynthesize_skill_batch
@@ -354,6 +391,9 @@ class SkillStore:
             llm=llm,
             tags=tags,
             system_prompt=system_prompt,
+            deduplicate=deduplicate,
+            similarity_threshold=similarity_threshold,
+            embed=embed,
         )
 
     # -- export / import -----------------------------------------------------

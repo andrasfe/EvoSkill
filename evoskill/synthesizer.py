@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Awaitable, Callable
 
@@ -75,10 +76,101 @@ LLMCallable = Callable[[list[dict[str, str]]], str]
 AsyncLLMCallable = Callable[[list[dict[str, str]]], Awaitable[str]]
 """Type alias: ``async (messages) -> str``."""
 
+EmbeddingCallable = Callable[[str], list[float]]
+"""Type alias: ``(text) -> list[float]``."""
+
+AsyncEmbeddingCallable = Callable[[str], Awaitable[list[float]]]
+"""Type alias: ``async (text) -> list[float]``."""
+
+
+# ---------------------------------------------------------------------------
+# Default OpenAI embedding adapter
+# ---------------------------------------------------------------------------
+
+
+def default_openai_embedding(text: str) -> list[float]:
+    """Default embedding implementation using the OpenAI SDK."""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=get_api_key())
+    response = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text,
+    )
+    return response.data[0].embedding
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _find_duplicate(
+    feedback_text: str,
+    existing_skills: list[Skill],
+    embed_fn: EmbeddingCallable,
+    threshold: float,
+) -> Skill | None:
+    """Return the best-matching existing skill if above *threshold*, else ``None``.
+
+    Also computes and caches embeddings on skills that don't have one yet.
+    """
+    feedback_embedding = embed_fn(feedback_text)
+    best_skill: Skill | None = None
+    best_sim = -1.0
+    for skill in existing_skills:
+        if skill.embedding is None:
+            skill.embedding = embed_fn(skill.content)
+        sim = _cosine_similarity(feedback_embedding, skill.embedding)
+        if sim > best_sim:
+            best_sim = sim
+            best_skill = skill
+    if best_sim >= threshold and best_skill is not None:
+        return best_skill
+    return None
+
+
+async def _afind_duplicate(
+    feedback_text: str,
+    existing_skills: list[Skill],
+    embed_fn: AsyncEmbeddingCallable | EmbeddingCallable,
+    threshold: float,
+) -> Skill | None:
+    """Async version of :func:`_find_duplicate`."""
+    import asyncio
+
+    result = embed_fn(feedback_text)
+    if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+        feedback_embedding = await result
+    else:
+        feedback_embedding = result  # type: ignore[assignment]
+
+    best_skill: Skill | None = None
+    best_sim = -1.0
+    for skill in existing_skills:
+        if skill.embedding is None:
+            emb_result = embed_fn(skill.content)
+            if asyncio.iscoroutine(emb_result) or asyncio.isfuture(emb_result):
+                skill.embedding = await emb_result
+            else:
+                skill.embedding = emb_result  # type: ignore[assignment]
+        sim = _cosine_similarity(feedback_embedding, skill.embedding)
+        if sim > best_sim:
+            best_sim = sim
+            best_skill = skill
+    if best_sim >= threshold and best_skill is not None:
+        return best_skill
+    return None
 
 
 def _parse_numbered_list(text: str) -> list[str]:
@@ -120,11 +212,17 @@ def synthesize_skill(
     tags: list[str] | None = None,
     system_prompt: str | None = None,
     user_template: str | None = None,
-) -> Skill:
+    deduplicate: bool = True,
+    similarity_threshold: float = 0.85,
+    embed: EmbeddingCallable | None = None,
+) -> Skill | None:
     """Synthesize a skill from an input + failure.
 
     Backward-compatible entry point: sets *agent_output* to ``"(not captured)"``
     and forwards to :func:`synthesize_skill_with_context`.
+
+    Returns ``None`` when *deduplicate* is ``True`` and an existing skill
+    already covers the feedback.
     """
     return synthesize_skill_with_context(
         role=role,
@@ -136,6 +234,9 @@ def synthesize_skill(
         tags=tags,
         system_prompt=system_prompt,
         user_template=user_template,
+        deduplicate=deduplicate,
+        similarity_threshold=similarity_threshold,
+        embed=embed,
     )
 
 
@@ -150,7 +251,10 @@ def synthesize_skill_with_context(
     tags: list[str] | None = None,
     system_prompt: str | None = None,
     user_template: str | None = None,
-) -> Skill:
+    deduplicate: bool = True,
+    similarity_threshold: float = 0.85,
+    embed: EmbeddingCallable | None = None,
+) -> Skill | None:
     """Synthesize a skill using the full context.
 
     Parameters
@@ -161,11 +265,35 @@ def synthesize_skill_with_context(
         Override the default user template.  Must contain ``{role}``,
         ``{input_prompt}``, ``{agent_output}``, ``{feedback}``, and
         ``{existing_skills}`` placeholders.
+    deduplicate:
+        When ``True`` (default), embed the feedback and compare against
+        existing skills.  If a match exceeds *similarity_threshold*, skip
+        synthesis and return ``None``.
+    similarity_threshold:
+        Cosine-similarity cutoff (default 0.85).
+    embed:
+        Embedding callable ``(text) -> list[float]``.  Falls back to
+        :func:`default_openai_embedding` when ``None``.
+
+    Returns ``None`` when deduplication matches an existing skill.
     """
-    existing = store.get_skills(role)
+    existing = store.get_skills(role, tags=tags)
     existing_text = (
         "\n".join(f"- {s.content}" for s in existing) if existing else "(none)"
     )
+
+    # -- deduplication check --------------------------------------------------
+    embed_fn = embed  # None means "skip embedding" — caller must supply a callable
+    if deduplicate and existing and embed_fn is not None:
+        matched = _find_duplicate(
+            feedback, existing, embed_fn, similarity_threshold,
+        )
+        if matched is not None:
+            # Persist any newly-computed embeddings
+            store._save_skills(role, existing)
+            return None
+        # Persist computed embeddings even when no match
+        store._save_skills(role, existing)
 
     sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
     usr_tmpl = user_template or DEFAULT_USER_TEMPLATE
@@ -187,8 +315,14 @@ def synthesize_skill_with_context(
     llm_fn = llm or default_openai_llm
     content = llm_fn(messages).strip()
 
+    # Embed the new skill so future dedup checks have it cached
+    new_embedding: list[float] | None = None
+    if deduplicate and embed_fn is not None:
+        new_embedding = embed_fn(content)
+
     skill = Skill(
         role=role, content=content, source="learned", tags=tags or [],
+        embedding=new_embedding,
     )
     store.add_skill(skill)
     return skill
@@ -209,7 +343,10 @@ async def asynthesize_skill(
     tags: list[str] | None = None,
     system_prompt: str | None = None,
     user_template: str | None = None,
-) -> Skill:
+    deduplicate: bool = True,
+    similarity_threshold: float = 0.85,
+    embed: AsyncEmbeddingCallable | EmbeddingCallable | None = None,
+) -> Skill | None:
     """Async version of :func:`synthesize_skill`."""
     return await asynthesize_skill_with_context(
         role=role,
@@ -221,6 +358,9 @@ async def asynthesize_skill(
         tags=tags,
         system_prompt=system_prompt,
         user_template=user_template,
+        deduplicate=deduplicate,
+        similarity_threshold=similarity_threshold,
+        embed=embed,
     )
 
 
@@ -235,12 +375,26 @@ async def asynthesize_skill_with_context(
     tags: list[str] | None = None,
     system_prompt: str | None = None,
     user_template: str | None = None,
-) -> Skill:
+    deduplicate: bool = True,
+    similarity_threshold: float = 0.85,
+    embed: AsyncEmbeddingCallable | EmbeddingCallable | None = None,
+) -> Skill | None:
     """Async version of :func:`synthesize_skill_with_context`."""
-    existing = store.get_skills(role)
+    existing = store.get_skills(role, tags=tags)
     existing_text = (
         "\n".join(f"- {s.content}" for s in existing) if existing else "(none)"
     )
+
+    # -- deduplication check --------------------------------------------------
+    embed_fn = embed  # None means "skip embedding"
+    if deduplicate and existing and embed_fn is not None:
+        matched = await _afind_duplicate(
+            feedback, existing, embed_fn, similarity_threshold,
+        )
+        if matched is not None:
+            store._save_skills(role, existing)
+            return None
+        store._save_skills(role, existing)
 
     sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
     usr_tmpl = user_template or DEFAULT_USER_TEMPLATE
@@ -264,8 +418,20 @@ async def asynthesize_skill_with_context(
     else:
         content = default_openai_llm(messages).strip()
 
+    # Embed the new skill
+    new_embedding: list[float] | None = None
+    if deduplicate and embed_fn is not None:
+        import asyncio
+
+        emb_result = embed_fn(content)
+        if asyncio.iscoroutine(emb_result) or asyncio.isfuture(emb_result):
+            new_embedding = await emb_result
+        else:
+            new_embedding = emb_result  # type: ignore[assignment]
+
     skill = Skill(
         role=role, content=content, source="learned", tags=tags or [],
+        embedding=new_embedding,
     )
     store.add_skill(skill)
     return skill
@@ -284,9 +450,17 @@ def synthesize_skill_batch(
     llm: LLMCallable | None = None,
     tags: list[str] | None = None,
     system_prompt: str | None = None,
+    deduplicate: bool = True,
+    similarity_threshold: float = 0.85,
+    embed: EmbeddingCallable | None = None,
 ) -> list[Skill]:
-    """Synthesize multiple skills in one LLM call from a batch of feedback items."""
-    existing = store.get_skills(role)
+    """Synthesize multiple skills in one LLM call from a batch of feedback items.
+
+    When *deduplicate* is ``True``, each synthesized skill is checked against
+    existing skills before being stored.  Skills that match an existing skill
+    above *similarity_threshold* are silently dropped from the returned list.
+    """
+    existing = store.get_skills(role, tags=tags)
     existing_text = (
         "\n".join(f"- {s.content}" for s in existing) if existing else "(none)"
     )
@@ -310,11 +484,32 @@ def synthesize_skill_batch(
     raw = llm_fn(messages).strip()
     contents = _parse_numbered_list(raw)
 
+    embed_fn = embed  # None means "skip embedding"
+
     skills: list[Skill] = []
     for text in contents:
-        skill = Skill(role=role, content=text, source="learned", tags=tags or [])
+        if deduplicate and embed_fn is not None and existing:
+            matched = _find_duplicate(text, existing, embed_fn, similarity_threshold)
+            if matched is not None:
+                continue
+
+        new_embedding: list[float] | None = None
+        if deduplicate and embed_fn is not None:
+            new_embedding = embed_fn(text)
+
+        skill = Skill(
+            role=role, content=text, source="learned", tags=tags or [],
+            embedding=new_embedding,
+        )
         store.add_skill(skill)
         skills.append(skill)
+        # Add to existing so subsequent items in the batch can dedup against it
+        existing.append(skill)
+
+    # Persist any newly-computed embeddings on pre-existing skills
+    if deduplicate and embed_fn is not None and existing:
+        store._save_skills(role, existing)
+
     return skills
 
 
@@ -326,9 +521,12 @@ async def asynthesize_skill_batch(
     llm: AsyncLLMCallable | None = None,
     tags: list[str] | None = None,
     system_prompt: str | None = None,
+    deduplicate: bool = True,
+    similarity_threshold: float = 0.85,
+    embed: AsyncEmbeddingCallable | EmbeddingCallable | None = None,
 ) -> list[Skill]:
     """Async version of :func:`synthesize_skill_batch`."""
-    existing = store.get_skills(role)
+    existing = store.get_skills(role, tags=tags)
     existing_text = (
         "\n".join(f"- {s.content}" for s in existing) if existing else "(none)"
     )
@@ -355,9 +553,36 @@ async def asynthesize_skill_batch(
 
     contents = _parse_numbered_list(raw)
 
+    embed_fn = embed  # None means "skip embedding"
+
     skills: list[Skill] = []
     for text in contents:
-        skill = Skill(role=role, content=text, source="learned", tags=tags or [])
+        if deduplicate and embed_fn is not None and existing:
+            matched = await _afind_duplicate(
+                text, existing, embed_fn, similarity_threshold,
+            )
+            if matched is not None:
+                continue
+
+        new_embedding: list[float] | None = None
+        if deduplicate and embed_fn is not None:
+            import asyncio
+
+            emb_result = embed_fn(text)
+            if asyncio.iscoroutine(emb_result) or asyncio.isfuture(emb_result):
+                new_embedding = await emb_result
+            else:
+                new_embedding = emb_result  # type: ignore[assignment]
+
+        skill = Skill(
+            role=role, content=text, source="learned", tags=tags or [],
+            embedding=new_embedding,
+        )
         store.add_skill(skill)
         skills.append(skill)
+        existing.append(skill)
+
+    if deduplicate and embed_fn is not None and existing:
+        store._save_skills(role, existing)
+
     return skills

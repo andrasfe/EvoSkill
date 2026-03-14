@@ -398,3 +398,431 @@ class TestBatchSynthesis:
             tags=["batch", "test"],
         )
         assert skills[0].tags == ["batch", "test"]
+
+
+# ---------------------------------------------------------------------------
+# Embedding-based deduplication
+# ---------------------------------------------------------------------------
+
+
+def _fake_embed(text: str) -> list[float]:
+    """Deterministic fake embedding: hash-based unit vector."""
+    import hashlib
+
+    h = hashlib.md5(text.encode()).hexdigest()
+    raw = [int(h[i : i + 2], 16) / 255.0 for i in range(0, 32, 2)]
+    norm = sum(x * x for x in raw) ** 0.5
+    return [x / norm for x in raw]
+
+
+def _identical_embed(_text: str) -> list[float]:
+    """Always returns the same vector — guarantees cosine sim = 1.0."""
+    return [1.0, 0.0, 0.0, 0.0]
+
+
+async def _async_fake_embed(text: str) -> list[float]:
+    """Async version of _fake_embed."""
+    return _fake_embed(text)
+
+
+async def _async_identical_embed(_text: str) -> list[float]:
+    return [1.0, 0.0, 0.0, 0.0]
+
+
+class TestCosineHelpers:
+    def test_cosine_identical_vectors(self) -> None:
+        from evoskill.synthesizer import _cosine_similarity
+
+        v = [1.0, 2.0, 3.0]
+        assert _cosine_similarity(v, v) == pytest.approx(1.0)
+
+    def test_cosine_orthogonal_vectors(self) -> None:
+        from evoskill.synthesizer import _cosine_similarity
+
+        a = [1.0, 0.0]
+        b = [0.0, 1.0]
+        assert _cosine_similarity(a, b) == pytest.approx(0.0)
+
+    def test_cosine_zero_vector(self) -> None:
+        from evoskill.synthesizer import _cosine_similarity
+
+        assert _cosine_similarity([0.0, 0.0], [1.0, 2.0]) == 0.0
+
+
+class TestFindDuplicate:
+    def test_returns_match_above_threshold(self, store: SkillStore) -> None:
+        from evoskill.synthesizer import _find_duplicate
+        from evoskill.skill import Skill
+
+        existing = [Skill(role="dev", content="test", source="learned")]
+        # _identical_embed makes everything sim=1.0
+        result = _find_duplicate("feedback", existing, _identical_embed, 0.85)
+        assert result is not None
+        assert result.content == "test"
+
+    def test_returns_none_below_threshold(self, store: SkillStore) -> None:
+        from evoskill.synthesizer import _find_duplicate
+        from evoskill.skill import Skill
+
+        existing = [Skill(role="dev", content="test", source="learned")]
+        result = _find_duplicate("feedback", existing, _fake_embed, 0.9999)
+        assert result is None
+
+    def test_caches_embeddings_on_skills(self) -> None:
+        from evoskill.synthesizer import _find_duplicate
+        from evoskill.skill import Skill
+
+        skill = Skill(role="dev", content="test skill", source="learned")
+        assert skill.embedding is None
+        _find_duplicate("query", [skill], _fake_embed, 0.99)
+        assert skill.embedding is not None
+        assert isinstance(skill.embedding, list)
+
+    def test_reuses_cached_embedding(self) -> None:
+        from evoskill.synthesizer import _find_duplicate
+        from evoskill.skill import Skill
+
+        cached = [0.5, 0.5, 0.5, 0.5]
+        skill = Skill(
+            role="dev", content="test", source="learned", embedding=cached,
+        )
+        call_count = 0
+
+        def counting_embed(text: str) -> list[float]:
+            nonlocal call_count
+            call_count += 1
+            return _fake_embed(text)
+
+        _find_duplicate("query", [skill], counting_embed, 0.99)
+        # Should only embed the query, NOT re-embed the skill
+        assert call_count == 1
+
+
+class TestDeduplicationSynthesizeSkill:
+    def test_returns_none_when_duplicate_found(self, store: SkillStore) -> None:
+        # Pre-populate with a skill
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing skill", source="learned"))
+
+        def should_not_call(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called when dedup matches")
+
+        result = synthesize_skill(
+            role="dev",
+            input_prompt="input",
+            failure="feedback",
+            store=store,
+            llm=should_not_call,
+            deduplicate=True,
+            similarity_threshold=0.01,  # Very low — everything matches
+            embed=_identical_embed,
+        )
+        assert result is None
+
+    def test_synthesizes_when_no_duplicate(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing skill", source="learned"))
+
+        def my_llm(messages: list[dict[str, str]]) -> str:
+            return "Brand new skill"
+
+        result = synthesize_skill(
+            role="dev",
+            input_prompt="input",
+            failure="feedback",
+            store=store,
+            llm=my_llm,
+            deduplicate=True,
+            similarity_threshold=0.9999,  # Very high — nothing matches
+            embed=_fake_embed,
+        )
+        assert result is not None
+        assert result.content == "Brand new skill"
+        assert result.embedding is not None  # New skill gets embedded
+
+    def test_deduplicate_false_skips_check(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        def my_llm(messages: list[dict[str, str]]) -> str:
+            return "New skill"
+
+        # Even with identical embeddings, deduplicate=False should proceed
+        result = synthesize_skill(
+            role="dev",
+            input_prompt="input",
+            failure="feedback",
+            store=store,
+            llm=my_llm,
+            deduplicate=False,
+            embed=_identical_embed,
+        )
+        assert result is not None
+        assert result.content == "New skill"
+        assert result.embedding is None  # No embedding when dedup disabled
+
+    def test_no_existing_skills_proceeds(self, store: SkillStore) -> None:
+        def my_llm(messages: list[dict[str, str]]) -> str:
+            return "First skill"
+
+        result = synthesize_skill(
+            role="dev",
+            input_prompt="input",
+            failure="feedback",
+            store=store,
+            llm=my_llm,
+            deduplicate=True,
+            embed=_fake_embed,
+        )
+        assert result is not None
+        assert result.content == "First skill"
+
+
+class TestDeduplicationWithContext:
+    def test_with_context_returns_none_on_match(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        def should_not_call(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called")
+
+        result = synthesize_skill_with_context(
+            role="dev",
+            input_prompt="inp",
+            agent_output="out",
+            feedback="fb",
+            store=store,
+            llm=should_not_call,
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_identical_embed,
+        )
+        assert result is None
+
+
+class TestDeduplicationAsync:
+    @pytest.mark.asyncio
+    async def test_async_returns_none_on_match(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        async def should_not_call(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called")
+
+        result = await asynthesize_skill(
+            role="dev",
+            input_prompt="inp",
+            failure="fb",
+            store=store,
+            llm=should_not_call,
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_async_identical_embed,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_async_synthesizes_when_no_match(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+            return "Async new skill"
+
+        result = await asynthesize_skill(
+            role="dev",
+            input_prompt="inp",
+            failure="fb",
+            store=store,
+            llm=my_async_llm,
+            deduplicate=True,
+            similarity_threshold=0.9999,
+            embed=_async_fake_embed,
+        )
+        assert result is not None
+        assert result.content == "Async new skill"
+        assert result.embedding is not None
+
+    @pytest.mark.asyncio
+    async def test_async_with_context_dedup(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        async def should_not_call(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called")
+
+        result = await asynthesize_skill_with_context(
+            role="dev",
+            input_prompt="inp",
+            agent_output="out",
+            feedback="fb",
+            store=store,
+            llm=should_not_call,
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_async_identical_embed,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_async_sync_embed_fallback(self, store: SkillStore) -> None:
+        """Async functions should work with sync embed callables too."""
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        async def should_not_call(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called")
+
+        result = await asynthesize_skill(
+            role="dev",
+            input_prompt="inp",
+            failure="fb",
+            store=store,
+            llm=should_not_call,
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_identical_embed,  # sync embed in async context
+        )
+        assert result is None
+
+
+class TestDeduplicationBatch:
+    def test_batch_dedup_drops_matching_skills(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "1. Existing duplicate.\n2. Brand new insight."
+
+        items = [
+            {"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"},
+            {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
+        ]
+        skills = synthesize_skill_batch(
+            role="dev", items=items, store=store, llm=fake_llm,
+            deduplicate=True,
+            similarity_threshold=0.01,  # Low threshold — everything matches existing
+            embed=_identical_embed,
+        )
+        # Both synthesized skills match existing (identical embed), so both dropped
+        assert len(skills) == 0
+
+    def test_batch_dedup_keeps_unique_skills(self, store: SkillStore) -> None:
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "1. Unique skill one.\n2. Unique skill two."
+
+        items = [
+            {"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"},
+            {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
+        ]
+        # No existing skills, so nothing to dedup against initially
+        skills = synthesize_skill_batch(
+            role="dev", items=items, store=store, llm=fake_llm,
+            deduplicate=True,
+            similarity_threshold=0.9999,
+            embed=_fake_embed,
+        )
+        assert len(skills) == 2
+
+    def test_batch_dedup_disabled(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "1. Skill A.\n2. Skill B."
+
+        items = [
+            {"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"},
+            {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
+        ]
+        skills = synthesize_skill_batch(
+            role="dev", items=items, store=store, llm=fake_llm,
+            deduplicate=False,
+        )
+        assert len(skills) == 2
+
+    @pytest.mark.asyncio
+    async def test_async_batch_dedup(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        async def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "1. Duplicate.\n2. Another duplicate."
+
+        items = [
+            {"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"},
+            {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
+        ]
+        skills = await asynthesize_skill_batch(
+            role="dev", items=items, store=store, llm=fake_llm,
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_async_identical_embed,
+        )
+        assert len(skills) == 0
+
+
+class TestEmbeddingCaching:
+    def test_embedding_persisted_on_new_skill(self, store: SkillStore) -> None:
+        def my_llm(messages: list[dict[str, str]]) -> str:
+            return "New synthesized skill"
+
+        skill = synthesize_skill(
+            role="dev",
+            input_prompt="input",
+            failure="feedback",
+            store=store,
+            llm=my_llm,
+            deduplicate=True,
+            embed=_fake_embed,
+        )
+        assert skill is not None
+        assert skill.embedding is not None
+        # Verify persisted
+        stored = store.get_skills("dev")
+        assert stored[0].embedding is not None
+
+    def test_embedding_not_set_when_dedup_disabled(self, store: SkillStore) -> None:
+        def my_llm(messages: list[dict[str, str]]) -> str:
+            return "Skill without embedding"
+
+        skill = synthesize_skill(
+            role="dev",
+            input_prompt="input",
+            failure="feedback",
+            store=store,
+            llm=my_llm,
+            deduplicate=False,
+        )
+        assert skill is not None
+        assert skill.embedding is None
+
+    def test_skill_embedding_roundtrip_json(self, store: SkillStore) -> None:
+        from evoskill.skill import Skill
+
+        embedding = [0.1, 0.2, 0.3]
+        skill = Skill(
+            role="dev", content="test", source="learned", embedding=embedding,
+        )
+        d = skill.to_dict()
+        assert d["embedding"] == embedding
+        restored = Skill.from_dict(d)
+        assert restored.embedding == embedding
+
+    def test_skill_no_embedding_in_dict(self) -> None:
+        from evoskill.skill import Skill
+
+        skill = Skill(role="dev", content="test", source="learned")
+        d = skill.to_dict()
+        assert "embedding" not in d

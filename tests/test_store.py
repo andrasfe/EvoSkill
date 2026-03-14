@@ -443,3 +443,131 @@ class TestExportImport:
         data = [{"role": "dev", "content": "new one", "source": "learned"}]
         store.import_skills("dev", data)
         assert len(store.get_skills("dev")) == 2
+
+
+# ---------------------------------------------------------------------------
+# 7. Deduplication via SkillStore API
+# ---------------------------------------------------------------------------
+
+
+def _identical_embed(_text: str) -> list[float]:
+    """Always returns the same vector — cosine sim = 1.0 for everything."""
+    return [1.0, 0.0, 0.0, 0.0]
+
+
+def _unique_embed(text: str) -> list[float]:
+    """Deterministic but unique embedding per text."""
+    import hashlib
+
+    h = hashlib.md5(text.encode()).hexdigest()
+    raw = [int(h[i : i + 2], 16) / 255.0 for i in range(0, 32, 2)]
+    norm = sum(x * x for x in raw) ** 0.5
+    return [x / norm for x in raw]
+
+
+class TestStoreDeduplication:
+    def test_learn_from_feedback_dedup_returns_none(self, store: SkillStore) -> None:
+        store.add_skill(Skill(role="dev", content="existing skill", source="learned"))
+
+        def should_not_call(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called")
+
+        result = store.learn_from_feedback(
+            role="dev",
+            llm=should_not_call,
+            input_prompt="inp",
+            agent_output="out",
+            reviewer_feedback="fb",
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_identical_embed,
+        )
+        assert result is None
+
+    def test_learn_from_feedback_dedup_disabled(self, store: SkillStore) -> None:
+        store.add_skill(Skill(role="dev", content="existing skill", source="learned"))
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "New skill"
+
+        result = store.learn_from_feedback(
+            role="dev",
+            llm=fake_llm,
+            input_prompt="inp",
+            agent_output="out",
+            reviewer_feedback="fb",
+            deduplicate=False,
+        )
+        assert result is not None
+        assert result.content == "New skill"
+
+    def test_learn_from_feedback_batch_dedup(self, store: SkillStore) -> None:
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "1. Dup skill.\n2. Another dup."
+
+        items = [
+            {"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"},
+            {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
+        ]
+        skills = store.learn_from_feedback_batch(
+            role="dev",
+            llm=fake_llm,
+            items=items,
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_identical_embed,
+        )
+        assert len(skills) == 0
+
+    @pytest.mark.asyncio
+    async def test_alearn_from_feedback_dedup(self, store: SkillStore) -> None:
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        async def should_not_call(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called")
+
+        result = await store.alearn_from_feedback(
+            role="dev",
+            llm=should_not_call,
+            input_prompt="inp",
+            agent_output="out",
+            reviewer_feedback="fb",
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_identical_embed,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_alearn_from_feedback_batch_dedup(self, store: SkillStore) -> None:
+        store.add_skill(Skill(role="dev", content="existing", source="learned"))
+
+        async def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "1. Dup.\n2. Another dup."
+
+        items = [
+            {"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"},
+            {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
+        ]
+        skills = await store.alearn_from_feedback_batch(
+            role="dev",
+            llm=fake_llm,
+            items=items,
+            deduplicate=True,
+            similarity_threshold=0.01,
+            embed=_identical_embed,
+        )
+        assert len(skills) == 0
+
+    def test_save_skills_helper(self, store: SkillStore) -> None:
+        skills = [
+            Skill(role="dev", content="s1", source="learned", embedding=[0.1, 0.2]),
+            Skill(role="dev", content="s2", source="learned", embedding=[0.3, 0.4]),
+        ]
+        store._save_skills("dev", skills)
+        loaded = store.get_skills("dev")
+        assert len(loaded) == 2
+        assert loaded[0].embedding == [0.1, 0.2]
+        assert loaded[1].embedding == [0.3, 0.4]

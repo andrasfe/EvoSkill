@@ -17,6 +17,7 @@ class Skill:
     enabled: bool = True
     hit_count: int = 0
     miss_count: int = 0
+    embedding: list[float] | None = field(default=None, repr=False)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
@@ -26,7 +27,7 @@ class Skill:
         return self.hit_count / total if total else 0.0
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "role": self.role,
             "content": self.content,
             "source": self.source,
@@ -36,6 +37,9 @@ class Skill:
             "miss_count": self.miss_count,
             "created_at": self.created_at.isoformat(),
         }
+        if self.embedding is not None:
+            d["embedding"] = self.embedding
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> Skill:
@@ -52,5 +56,6 @@ class Skill:
             enabled=data.get("enabled", True),
             hit_count=data.get("hit_count", 0),
             miss_count=data.get("miss_count", 0),
+            embedding=data.get("embedding"),
             created_at=created_at,
         )
