@@ -23,15 +23,6 @@ def _store_path(tmp_path: Path) -> Path:
     return p
 
 
-def _patch_store(func, tmp_path: Path) -> SkillStore:
-    """Replace the decorator's internal store with one backed by tmp_path."""
-    store = SkillStore(storage_path=_store_path(tmp_path))
-    func._evoskill_store = store  # type: ignore[attr-defined]
-    # Also patch the store reference inside the closure
-    # We'll use the store fixture directly via the decorator's attribute
-    return store
-
-
 # ---------------------------------------------------------------------------
 # Sync function tests
 # ---------------------------------------------------------------------------
@@ -43,10 +34,6 @@ class TestSyncWrapping:
         def agent(prompt: str) -> str:
             return f"got: {prompt}"
 
-        # Replace store
-        store = SkillStore(storage_path=_store_path(tmp_path))
-        agent._evoskill_store.__dict__.update(store.__dict__)
-        # Monkey-patch the store path
         agent._evoskill_store._path = _store_path(tmp_path)
 
         result = agent("hello")
@@ -197,3 +184,113 @@ class TestMethodWrapping:
 
         result = obj.run("test")
         assert "custom skill" in result
+
+
+# ---------------------------------------------------------------------------
+# Custom inject_skills callback
+# ---------------------------------------------------------------------------
+
+
+class TestInjectSkills:
+    def test_custom_inject_skills(self, tmp_path: Path) -> None:
+        """User provides a custom inject_skills to control where skills go."""
+
+        def my_inject(args: tuple, kwargs: dict, skills_text: str) -> tuple[tuple, dict]:
+            # Inject skills into a kwarg called 'system_prompt' instead
+            new_kwargs = {**kwargs, "system_prompt": skills_text + kwargs.get("system_prompt", "")}
+            return args, new_kwargs
+
+        @evoskill(role="custom", inject_skills=my_inject)
+        def agent(task: dict, system_prompt: str = "") -> str:
+            return f"sys={system_prompt} task={task}"
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("custom", "be careful")
+
+        result = agent({"type": "analyze"}, system_prompt="base prompt")
+        assert "be careful" in result
+        assert "base prompt" in result
+
+    def test_structured_input_not_modified_without_inject(self, tmp_path: Path) -> None:
+        """When input is not a string and no inject_skills, args pass through unchanged."""
+
+        @evoskill(role="structured")
+        def agent(task: dict) -> str:
+            return str(task)
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("structured", "some skill")
+
+        # The dict arg is not a string, so default inject is a no-op
+        result = agent({"key": "value"})
+        assert "key" in result
+
+
+# ---------------------------------------------------------------------------
+# BYO LLM
+# ---------------------------------------------------------------------------
+
+
+class TestBYOLLM:
+    @patch("evoskill.decorator.synthesize_skill")
+    def test_llm_passed_to_synthesizer(
+        self, mock_synth: MagicMock, tmp_path: Path
+    ) -> None:
+        def my_llm(messages: list[dict[str, str]]) -> str:
+            return "custom skill"
+
+        @evoskill(role="dev", llm=my_llm)
+        def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+
+        with pytest.raises(ValueError):
+            agent("test")
+
+        mock_synth.assert_called_once()
+        # Check that llm kwarg was passed through
+        assert mock_synth.call_args.kwargs["llm"] is my_llm
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+
+class TestDecoratorTags:
+    def test_tags_used_for_skill_retrieval(self, tmp_path: Path) -> None:
+        @evoskill(role="analyst", tags=["python"])
+        def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("analyst", "tagged skill", tags=["python"])
+        agent._evoskill_store.add_manual_skill("analyst", "untagged skill", tags=["sql"])
+
+        result = agent("do analysis")
+        assert "tagged skill" in result
+        # The sql-tagged skill should NOT appear since decorator filters by tags=["python"]
+        assert "untagged skill" not in result
+
+
+# ---------------------------------------------------------------------------
+# max_skills
+# ---------------------------------------------------------------------------
+
+
+class TestMaxSkills:
+    def test_max_skills_limits_injection(self, tmp_path: Path) -> None:
+        @evoskill(role="dev", max_skills=2)
+        def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        for i in range(5):
+            agent._evoskill_store.add_manual_skill("dev", f"skill {i}")
+
+        result = agent("test")
+        # Only the last 2 skills should be injected
+        assert "skill 3" in result
+        assert "skill 4" in result
+        assert "skill 0" not in result

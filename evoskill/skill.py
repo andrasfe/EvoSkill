@@ -13,6 +13,8 @@ class Skill:
     role: str
     content: str
     source: str  # 'manual' | 'learned'
+    tags: list[str] = field(default_factory=list)
+    enabled: bool = True
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict:
@@ -20,6 +22,8 @@ class Skill:
             "role": self.role,
             "content": self.content,
             "source": self.source,
+            "tags": self.tags,
+            "enabled": self.enabled,
             "created_at": self.created_at.isoformat(),
         }
 
@@ -34,5 +38,7 @@ class Skill:
             role=data["role"],
             content=data["content"],
             source=data["source"],
+            tags=data.get("tags", []),
+            enabled=data.get("enabled", True),
             created_at=created_at,
         )
