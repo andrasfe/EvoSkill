@@ -18,7 +18,6 @@ from evoskill.store import SkillStore
 # ---------------------------------------------------------------------------
 
 def _store_path(tmp_path: Path) -> Path:
-    """Return a unique sub-directory inside tmp_path for skill storage."""
     p = tmp_path / "skills"
     p.mkdir(exist_ok=True)
     return p
@@ -36,14 +35,13 @@ class TestSyncWrapping:
             return f"got: {prompt}"
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         result = agent("hello")
         assert "hello" in result
 
     def test_skill_prepending(self, tmp_path: Path) -> None:
         @evoskill(role="analyst")
         def agent(prompt: str) -> str:
-            return prompt  # echo back the augmented prompt
+            return prompt
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent._evoskill_store.add_manual_skill("analyst", "always validate")
@@ -53,10 +51,7 @@ class TestSyncWrapping:
         assert "always validate" in result
         assert "do analysis" in result
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_exception_triggers_learning(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
+    def test_exception_triggers_learning(self, tmp_path: Path) -> None:
         @evoskill(role="analyst")
         def agent(prompt: str) -> str:
             raise ValueError("bad data")
@@ -66,15 +61,14 @@ class TestSyncWrapping:
         with pytest.raises(ValueError, match="bad data"):
             agent("analyze this")
 
-        mock_synth.assert_called_once()
-        call_args = mock_synth.call_args
-        assert call_args[0][0] == "analyst"  # role
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        buf = store._buffers["analyst"]
+        assert buf.items[0]["input_prompt"] == "analyze this"
+        assert "bad data" in buf.items[0]["reviewer_feedback"]
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_learn_when_callback(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        def should_learn(inp: str, out: str) -> bool:
+    def test_learn_when_callback(self, tmp_path: Path) -> None:
+        def should_learn(inp, out):
             return "bad" in out
 
         @evoskill(role="analyst", learn_when=should_learn)
@@ -82,22 +76,20 @@ class TestSyncWrapping:
             return "bad result"
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         agent("test")
-        mock_synth.assert_called_once()
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        buf = store._buffers["analyst"]
+        assert buf.items[0]["input_prompt"] == "test"
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_no_learning_on_success(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
+    def test_no_learning_on_success(self, tmp_path: Path) -> None:
         @evoskill(role="analyst")
         def agent(prompt: str) -> str:
             return "good result"
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         agent("test")
-        mock_synth.assert_not_called()
+        assert agent._evoskill_store.pending_buffer_count == 0
 
     def test_manual_skills_via_decorator(self, tmp_path: Path) -> None:
         @evoskill(role="dev", skills=["use type hints", "write docstrings"])
@@ -105,7 +97,6 @@ class TestSyncWrapping:
             return prompt
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         result = agent("code review")
         assert "use type hints" in result
         assert "write docstrings" in result
@@ -123,7 +114,6 @@ class TestAsyncWrapping:
             return f"got: {prompt}"
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         result = asyncio.get_event_loop().run_until_complete(agent("hello"))
         assert "hello" in result
 
@@ -138,16 +128,7 @@ class TestAsyncWrapping:
         result = asyncio.get_event_loop().run_until_complete(agent("query"))
         assert "check nulls" in result
 
-    @patch("evoskill.decorator.asynthesize_skill")
-    def test_async_exception_triggers_learning(
-        self, mock_asynth: MagicMock, tmp_path: Path
-    ) -> None:
-        # Make the mock return a coroutine
-        async def _noop(*a, **kw):
-            return MagicMock()
-
-        mock_asynth.side_effect = _noop
-
+    def test_async_exception_triggers_learning(self, tmp_path: Path) -> None:
         @evoskill(role="dev")
         async def agent(prompt: str) -> str:
             raise RuntimeError("oops")
@@ -157,18 +138,13 @@ class TestAsyncWrapping:
         with pytest.raises(RuntimeError, match="oops"):
             asyncio.get_event_loop().run_until_complete(agent("fix this"))
 
-        mock_asynth.assert_called_once()
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        buf = store._buffers["dev"]
+        assert "oops" in buf.items[0]["reviewer_feedback"]
 
-    @patch("evoskill.decorator.asynthesize_skill")
-    def test_async_learn_when_uses_async_synthesis(
-        self, mock_asynth: MagicMock, tmp_path: Path
-    ) -> None:
-        async def _noop(*a, **kw):
-            return MagicMock()
-
-        mock_asynth.side_effect = _noop
-
-        def should_learn(inp: str, out: str) -> bool:
+    def test_async_learn_when_uses_async_synthesis(self, tmp_path: Path) -> None:
+        def should_learn(inp, out):
             return "bad" in out
 
         @evoskill(role="dev", learn_when=should_learn)
@@ -176,14 +152,12 @@ class TestAsyncWrapping:
             return "bad output"
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         asyncio.get_event_loop().run_until_complete(agent("test"))
-        mock_asynth.assert_called_once()
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
 
     def test_async_with_async_llm(self, tmp_path: Path) -> None:
-        """Async decorator passes async LLM through to synthesis."""
-
-        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+        async def my_async_llm(messages):
             return "async skill"
 
         @evoskill(role="dev", llm=my_async_llm)
@@ -191,7 +165,6 @@ class TestAsyncWrapping:
             return prompt
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         result = asyncio.get_event_loop().run_until_complete(agent("hello"))
         assert "hello" in result
 
@@ -211,7 +184,6 @@ class TestMethodWrapping:
         obj = DataAnalyst()
         obj.run._evoskill_store._path = _store_path(tmp_path)
         obj.run._evoskill_store.add_manual_skill("DataAnalyst", "be precise")
-
         result = obj.run("analyze")
         assert "be precise" in result
 
@@ -224,7 +196,6 @@ class TestMethodWrapping:
         obj = DataAnalyst()
         obj.run._evoskill_store._path = _store_path(tmp_path)
         obj.run._evoskill_store.add_manual_skill("custom_role", "custom skill")
-
         result = obj.run("test")
         assert "custom skill" in result
 
@@ -236,12 +207,10 @@ class TestMethodWrapping:
 
 class TestInjectSkills:
     def test_custom_inject_skills(self, tmp_path: Path) -> None:
-        """User provides a custom inject_skills to control where skills go."""
-
-        def my_inject(args: tuple, kwargs: dict, skills_text: str) -> tuple[tuple, dict]:
-            # Inject skills into a kwarg called 'system_prompt' instead
-            new_kwargs = {**kwargs, "system_prompt": skills_text + kwargs.get("system_prompt", "")}
-            return args, new_kwargs
+        def my_inject(args, kwargs, skills_text):
+            new_kw = dict(kwargs)
+            new_kw["system_prompt"] = skills_text + kwargs.get("system_prompt", "")
+            return args, new_kw
 
         @evoskill(role="custom", inject_skills=my_inject)
         def agent(task: dict, system_prompt: str = "") -> str:
@@ -249,22 +218,17 @@ class TestInjectSkills:
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent._evoskill_store.add_manual_skill("custom", "be careful")
-
         result = agent({"type": "analyze"}, system_prompt="base prompt")
         assert "be careful" in result
         assert "base prompt" in result
 
     def test_structured_input_not_modified_without_inject(self, tmp_path: Path) -> None:
-        """When input is not a string and no inject_skills, args pass through unchanged."""
-
         @evoskill(role="structured")
         def agent(task: dict) -> str:
             return str(task)
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent._evoskill_store.add_manual_skill("structured", "some skill")
-
-        # The dict arg is not a string, so default inject is a no-op
         result = agent({"key": "value"})
         assert "key" in result
 
@@ -275,11 +239,8 @@ class TestInjectSkills:
 
 
 class TestBYOLLM:
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_sync_llm_passed_to_synthesizer(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        def my_llm(messages: list[dict[str, str]]) -> str:
+    def test_sync_llm_stored_in_buffer(self, tmp_path: Path) -> None:
+        def my_llm(messages):
             return "custom skill"
 
         @evoskill(role="dev", llm=my_llm)
@@ -287,23 +248,15 @@ class TestBYOLLM:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             agent("test")
 
-        mock_synth.assert_called_once()
-        assert mock_synth.call_args.kwargs["llm"] is my_llm
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert store._buffers["dev"].llm is my_llm
 
-    @patch("evoskill.decorator.asynthesize_skill")
-    def test_async_llm_passed_to_async_synthesizer(
-        self, mock_asynth: MagicMock, tmp_path: Path
-    ) -> None:
-        async def _noop(*a, **kw):
-            return MagicMock()
-
-        mock_asynth.side_effect = _noop
-
-        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+    def test_async_llm_stored_in_buffer(self, tmp_path: Path) -> None:
+        async def my_async_llm(messages):
             return "async custom skill"
 
         @evoskill(role="dev", llm=my_async_llm)
@@ -311,12 +264,12 @@ class TestBYOLLM:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             asyncio.get_event_loop().run_until_complete(agent("test"))
 
-        mock_asynth.assert_called_once()
-        assert mock_asynth.call_args.kwargs["llm"] is my_async_llm
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert store._buffers["dev"].llm is my_async_llm
 
 
 # ---------------------------------------------------------------------------
@@ -333,10 +286,8 @@ class TestDecoratorTags:
         agent._evoskill_store._path = _store_path(tmp_path)
         agent._evoskill_store.add_manual_skill("analyst", "tagged skill", tags=["python"])
         agent._evoskill_store.add_manual_skill("analyst", "untagged skill", tags=["sql"])
-
         result = agent("do analysis")
         assert "tagged skill" in result
-        # The sql-tagged skill should NOT appear since decorator filters by tags=["python"]
         assert "untagged skill" not in result
 
 
@@ -356,14 +307,13 @@ class TestMaxSkills:
             agent._evoskill_store.add_manual_skill("dev", f"skill {i}")
 
         result = agent("test")
-        # Only the last 2 skills should be injected
         assert "skill 3" in result
         assert "skill 4" in result
         assert "skill 0" not in result
 
 
 # ---------------------------------------------------------------------------
-# 1. inject_field — Pydantic model field injection
+# inject_field
 # ---------------------------------------------------------------------------
 
 
@@ -374,36 +324,28 @@ class AgentInput(BaseModel):
 
 class TestInjectField:
     def test_injects_into_pydantic_field(self, tmp_path: Path) -> None:
-        """inject_field sets the named field on the first Pydantic arg."""
-
         @evoskill(role="writer", inject_field="skill_context")
         def agent(input_data: AgentInput) -> str:
             return f"ctx={input_data.skill_context} task={input_data.task}"
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent._evoskill_store.add_manual_skill("writer", "use active voice")
-
         result = agent(AgentInput(task="write essay"))
         assert "use active voice" in result
         assert "write essay" in result
 
     def test_original_model_not_mutated(self, tmp_path: Path) -> None:
-        """model_copy should produce a new object — original stays unchanged."""
-
         @evoskill(role="writer", inject_field="skill_context")
         def agent(input_data: AgentInput) -> str:
             return input_data.skill_context
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent._evoskill_store.add_manual_skill("writer", "be concise")
-
         original = AgentInput(task="draft")
         agent(original)
         assert original.skill_context == ""
 
     def test_no_skills_no_mutation(self, tmp_path: Path) -> None:
-        """With no skills, the field stays at its default."""
-
         @evoskill(role="empty", inject_field="skill_context")
         def agent(input_data: AgentInput) -> str:
             return input_data.skill_context
@@ -413,8 +355,6 @@ class TestInjectField:
         assert result == ""
 
     def test_inject_field_on_method(self, tmp_path: Path) -> None:
-        """inject_field works correctly when the decorated function is a method."""
-
         class Writer:
             @evoskill(role="Writer", inject_field="skill_context")
             def run(self, input_data: AgentInput) -> str:
@@ -423,12 +363,10 @@ class TestInjectField:
         obj = Writer()
         obj.run._evoskill_store._path = _store_path(tmp_path)
         obj.run._evoskill_store.add_manual_skill("Writer", "cite sources")
-
         result = obj.run(AgentInput(task="report"))
         assert "cite sources" in result
 
     def test_inject_field_and_inject_skills_mutually_exclusive(self) -> None:
-        """Passing both inject_field and inject_skills should raise."""
         with pytest.raises(ValueError, match="mutually exclusive"):
             evoskill(
                 role="x",
@@ -437,15 +375,12 @@ class TestInjectField:
             )
 
     def test_inject_field_async(self, tmp_path: Path) -> None:
-        """inject_field works with async functions."""
-
         @evoskill(role="writer", inject_field="skill_context")
         async def agent(input_data: AgentInput) -> str:
             return input_data.skill_context
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent._evoskill_store.add_manual_skill("writer", "short sentences")
-
         result = asyncio.get_event_loop().run_until_complete(
             agent(AgentInput(task="blog"))
         )
@@ -453,79 +388,59 @@ class TestInjectField:
 
 
 # ---------------------------------------------------------------------------
-# 2. extract_input — pull prompt text from structured input
+# extract_input
 # ---------------------------------------------------------------------------
 
 
 class TestExtractInput:
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_extract_input_used_for_synthesis_context(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """extract_input provides the prompt string for synthesis."""
-
-        def my_extract(input_data: AgentInput) -> str:
+    def test_extract_input_used_for_synthesis_context(self, tmp_path: Path) -> None:
+        def my_extract(input_data):
             return input_data.task
 
-        @evoskill(
-            role="dev",
-            extract_input=my_extract,
-            inject_field="skill_context",
-        )
+        @evoskill(role="dev", extract_input=my_extract, inject_field="skill_context")
         def agent(input_data: AgentInput) -> str:
             raise ValueError("oops")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             agent(AgentInput(task="my specific task"))
 
-        mock_synth.assert_called_once()
-        # The second positional arg to synthesize_skill is the input_prompt
-        assert mock_synth.call_args[0][1] == "my specific task"
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert store._buffers["dev"].items[0]["input_prompt"] == "my specific task"
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_default_prompt_extraction_for_non_string(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """Without extract_input and non-string arg, prompt defaults to ''."""
-
+    def test_default_prompt_extraction_for_non_string(self, tmp_path: Path) -> None:
         @evoskill(role="dev")
         def agent(data: dict) -> str:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             agent({"key": "val"})
 
-        mock_synth.assert_called_once()
-        assert mock_synth.call_args[0][1] == ""
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert store._buffers["dev"].items[0]["input_prompt"] == ""
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_extract_input_receives_kwargs(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """extract_input should receive both args and kwargs."""
-
-        def my_extract(data: dict, mode: str = "") -> str:
-            return f"{data['key']}-{mode}"
+    def test_extract_input_receives_kwargs(self, tmp_path: Path) -> None:
+        def my_extract(data, mode=""):
+            return str(data["key"]) + "-" + mode
 
         @evoskill(role="dev", extract_input=my_extract)
         def agent(data: dict, mode: str = "") -> str:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             agent({"key": "val"}, mode="fast")
 
-        mock_synth.assert_called_once()
-        assert mock_synth.call_args[0][1] == "val-fast"
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert store._buffers["dev"].items[0]["input_prompt"] == "val-fast"
 
 
 # ---------------------------------------------------------------------------
-# 3. extract_output — pull content from structured output
+# extract_output
 # ---------------------------------------------------------------------------
 
 
@@ -535,193 +450,118 @@ class ReviewResult(BaseModel):
 
 
 class TestExtractOutput:
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_extract_output_used_in_learn_when(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """extract_output converts output before passing to synthesis.
-
-        learn_when still receives the raw result object so it can inspect
-        any field.  extract_output only affects the string sent to the
-        synthesizer.
-        """
-
-        def my_extract(result: ReviewResult) -> str:
+    def test_extract_output_used_in_learn_when(self, tmp_path: Path) -> None:
+        def my_extract(result):
             return result.issues
 
-        def should_learn(inp: str, out: ReviewResult) -> bool:
+        def should_learn(inp, out):
             return "error" in out.issues
 
-        @evoskill(
-            role="coder",
-            learn_when=should_learn,
-            extract_output=my_extract,
-        )
+        @evoskill(role="coder", learn_when=should_learn, extract_output=my_extract)
         def agent(prompt: str) -> ReviewResult:
             return ReviewResult(score=3, issues="found error in line 5")
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent("check code")
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "found error in line 5" in store._buffers["coder"].items[0]["reviewer_feedback"]
 
-        mock_synth.assert_called_once()
-        # The failure text (3rd positional arg) should be the extracted issues
-        assert "found error in line 5" in mock_synth.call_args[0][2]
-
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_default_str_conversion_without_extract_output(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """Without extract_output, str(output) is used."""
-
-        def should_learn(_inp: str, _out: str) -> bool:
-            return True
-
-        @evoskill(role="dev", learn_when=should_learn)
+    def test_default_str_conversion_without_extract_output(self, tmp_path: Path) -> None:
+        @evoskill(role="dev", learn_when=lambda i, o: True)
         def agent(prompt: str) -> str:
             return "plain output"
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent("test")
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "plain output" in store._buffers["dev"].items[0]["reviewer_feedback"]
 
-        mock_synth.assert_called_once()
-        assert "plain output" in mock_synth.call_args[0][2]
-
-    @patch("evoskill.decorator.asynthesize_skill")
-    def test_extract_output_async(
-        self, mock_asynth: MagicMock, tmp_path: Path
-    ) -> None:
-        """extract_output works with async wrappers too."""
-
-        async def _noop(*a, **kw):
-            return MagicMock()
-
-        mock_asynth.side_effect = _noop
-
-        def my_extract(result: ReviewResult) -> str:
+    def test_extract_output_async(self, tmp_path: Path) -> None:
+        def my_extract(result):
             return result.issues
 
-        def should_learn(_inp: str, out: ReviewResult) -> bool:
+        def should_learn(_inp, out):
             return "bug" in out.issues
 
-        @evoskill(
-            role="coder",
-            learn_when=should_learn,
-            extract_output=my_extract,
-        )
+        @evoskill(role="coder", learn_when=should_learn, extract_output=my_extract)
         async def agent(prompt: str) -> ReviewResult:
             return ReviewResult(score=1, issues="bug in parser")
 
         agent._evoskill_store._path = _store_path(tmp_path)
         asyncio.get_event_loop().run_until_complete(agent("review"))
-
-        mock_asynth.assert_called_once()
-        assert "bug in parser" in mock_asynth.call_args[0][2]
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "bug in parser" in store._buffers["coder"].items[0]["reviewer_feedback"]
 
 
 # ---------------------------------------------------------------------------
-# 4. teach_role — cross-agent teaching
+# teach_role
 # ---------------------------------------------------------------------------
 
 
 class TestTeachRole:
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_teach_role_on_exception(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """Skills from exceptions are stored under teach_role, not the agent's own role."""
-
+    def test_teach_role_on_exception(self, tmp_path: Path) -> None:
         @evoskill(role="reviewer", teach_role="writer")
         def agent(prompt: str) -> str:
             raise ValueError("bad")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             agent("review this")
 
-        mock_synth.assert_called_once()
-        # First positional arg is the role — should be 'writer', not 'reviewer'
-        assert mock_synth.call_args[0][0] == "writer"
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "writer" in store._buffers
+        assert "reviewer" not in store._buffers
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_teach_role_on_learn_when(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """learn_when callback stores skills under teach_role."""
-
-        def should_learn(_inp: str, _out: str) -> bool:
-            return True
-
-        @evoskill(role="reviewer", teach_role="writer", learn_when=should_learn)
+    def test_teach_role_on_learn_when(self, tmp_path: Path) -> None:
+        @evoskill(role="reviewer", teach_role="writer", learn_when=lambda i, o: True)
         def agent(prompt: str) -> str:
             return "issues found"
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent("review")
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "writer" in store._buffers
 
-        mock_synth.assert_called_once()
-        assert mock_synth.call_args[0][0] == "writer"
-
-    @patch("evoskill.decorator.asynthesize_skill")
-    def test_teach_role_async(
-        self, mock_asynth: MagicMock, tmp_path: Path
-    ) -> None:
-        """teach_role works with async wrappers."""
-
-        async def _noop(*a, **kw):
-            return MagicMock()
-
-        mock_asynth.side_effect = _noop
-
+    def test_teach_role_async(self, tmp_path: Path) -> None:
         @evoskill(role="reviewer", teach_role="writer")
         async def agent(prompt: str) -> str:
             raise RuntimeError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(RuntimeError):
             asyncio.get_event_loop().run_until_complete(agent("check"))
 
-        mock_asynth.assert_called_once()
-        assert mock_asynth.call_args[0][0] == "writer"
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "writer" in store._buffers
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_no_teach_role_uses_own_role(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """Without teach_role, skills are stored under the agent's own role."""
-
+    def test_no_teach_role_uses_own_role(self, tmp_path: Path) -> None:
         @evoskill(role="analyst")
         def agent(prompt: str) -> str:
             raise ValueError("err")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             agent("test")
 
-        mock_synth.assert_called_once()
-        assert mock_synth.call_args[0][0] == "analyst"
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "analyst" in store._buffers
 
 
 # ---------------------------------------------------------------------------
-# 5. Async wrapper uses async LLM callable
+# Async wrapper uses async buffer path
 # ---------------------------------------------------------------------------
 
 
 class TestAsyncNonBlocking:
-    @patch("evoskill.decorator.asynthesize_skill")
-    def test_async_wrapper_calls_asynthesize(
-        self, mock_asynth: MagicMock, tmp_path: Path
-    ) -> None:
-        """Async wrapper must call asynthesize_skill, not synthesize_skill."""
-
-        async def _noop(*a, **kw):
-            return MagicMock()
-
-        mock_asynth.side_effect = _noop
-
-        async def my_async_llm(messages: list[dict[str, str]]) -> str:
+    def test_async_wrapper_buffers_with_async_path(self, tmp_path: Path) -> None:
+        async def my_async_llm(messages):
             return "skill from async llm"
 
         @evoskill(role="dev", llm=my_async_llm)
@@ -729,50 +569,33 @@ class TestAsyncNonBlocking:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             asyncio.get_event_loop().run_until_complete(agent("test"))
 
-        # Must use async synthesis, not sync
-        mock_asynth.assert_called_once()
-        assert mock_asynth.call_args.kwargs["llm"] is my_async_llm
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert store._buffers["dev"].llm is my_async_llm
 
-    @patch("evoskill.decorator.asynthesize_skill")
-    def test_async_learn_when_calls_asynthesize(
-        self, mock_asynth: MagicMock, tmp_path: Path
-    ) -> None:
-        """Async learn_when path also uses asynthesize_skill."""
-
-        async def _noop(*a, **kw):
-            return MagicMock()
-
-        mock_asynth.side_effect = _noop
-
-        async def my_llm(msgs: list[dict[str, str]]) -> str:
+    def test_async_learn_when_buffers(self, tmp_path: Path) -> None:
+        async def my_llm(msgs):
             return "skill"
 
-        @evoskill(
-            role="dev",
-            llm=my_llm,
-            learn_when=lambda i, o: True,
-        )
+        @evoskill(role="dev", llm=my_llm, learn_when=lambda i, o: True)
         async def agent(prompt: str) -> str:
             return "output"
 
         agent._evoskill_store._path = _store_path(tmp_path)
         asyncio.get_event_loop().run_until_complete(agent("test"))
-        mock_asynth.assert_called_once()
+        assert agent._evoskill_store.pending_buffer_count == 1
 
 
 # ---------------------------------------------------------------------------
-# 6. is_method — explicit method declaration
+# is_method
 # ---------------------------------------------------------------------------
 
 
 class TestIsMethod:
     def test_is_method_true_skips_self(self, tmp_path: Path) -> None:
-        """is_method=True treats the first arg as self even without 'self' param name."""
-
         class Agent:
             @evoskill(role="Agent", is_method=True)
             def run(this_is_not_self, prompt: str) -> str:
@@ -781,29 +604,22 @@ class TestIsMethod:
         obj = Agent()
         obj.run._evoskill_store._path = _store_path(tmp_path)
         obj.run._evoskill_store.add_manual_skill("Agent", "be helpful")
-
         result = obj.run("hello")
         assert "be helpful" in result
         assert "hello" in result
 
     def test_is_method_false_on_function_with_self_param(self, tmp_path: Path) -> None:
-        """is_method=False prevents treating first arg as self."""
-
         @evoskill(role="agent", is_method=False)
         def process(self_data: str) -> str:
             return self_data
 
         process._evoskill_store._path = _store_path(tmp_path)
         process._evoskill_store.add_manual_skill("agent", "check types")
-
         result = process("my data")
-        # Skills should be prepended to the first arg (self_data)
         assert "check types" in result
         assert "my data" in result
 
     def test_is_method_none_uses_heuristic(self, tmp_path: Path) -> None:
-        """is_method=None (default) falls back to the self/cls heuristic."""
-
         class MyAgent:
             @evoskill()
             def run(self, prompt: str) -> str:
@@ -812,16 +628,10 @@ class TestIsMethod:
         obj = MyAgent()
         obj.run._evoskill_store._path = _store_path(tmp_path)
         obj.run._evoskill_store.add_manual_skill("MyAgent", "be precise")
-
         result = obj.run("test")
         assert "be precise" in result
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_is_method_true_resolves_role_from_class(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """is_method=True + no explicit role => role inferred from class name."""
-
+    def test_is_method_true_resolves_role_from_class(self, tmp_path: Path) -> None:
         class Reviewer:
             @evoskill(is_method=True)
             def check(this, prompt: str) -> str:
@@ -829,12 +639,12 @@ class TestIsMethod:
 
         obj = Reviewer()
         obj.check._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             obj.check("test")
 
-        mock_synth.assert_called_once()
-        assert mock_synth.call_args[0][0] == "Reviewer"
+        store = obj.check._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "Reviewer" in store._buffers
 
 
 # ---------------------------------------------------------------------------
@@ -843,56 +653,198 @@ class TestIsMethod:
 
 
 class TestCombinedFeatures:
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_inject_field_with_extract_input_and_teach_role(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """All three features work together on a single decorator."""
-
-        def my_extract(input_data: AgentInput) -> str:
+    def test_inject_field_with_extract_input_and_teach_role(self, tmp_path: Path) -> None:
+        def my_extract(input_data):
             return input_data.task
 
         @evoskill(
-            role="reviewer",
-            teach_role="writer",
-            inject_field="skill_context",
-            extract_input=my_extract,
+            role="reviewer", teach_role="writer",
+            inject_field="skill_context", extract_input=my_extract,
         )
         def agent(input_data: AgentInput) -> str:
             raise ValueError("bad writing")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-
         with pytest.raises(ValueError):
             agent(AgentInput(task="review draft"))
 
-        mock_synth.assert_called_once()
-        # teach_role should direct the skill to 'writer'
-        assert mock_synth.call_args[0][0] == "writer"
-        # extract_input should provide the prompt
-        assert mock_synth.call_args[0][1] == "review draft"
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "writer" in store._buffers
+        assert store._buffers["writer"].items[0]["input_prompt"] == "review draft"
 
-    @patch("evoskill.decorator.synthesize_skill")
-    def test_extract_output_with_teach_role(
-        self, mock_synth: MagicMock, tmp_path: Path
-    ) -> None:
-        """extract_output + teach_role + learn_when work together."""
-
-        def my_extract_out(result: ReviewResult) -> str:
+    def test_extract_output_with_teach_role(self, tmp_path: Path) -> None:
+        def my_extract_out(result):
             return result.issues
 
         @evoskill(
-            role="reviewer",
-            teach_role="writer",
-            extract_output=my_extract_out,
-            learn_when=lambda i, o: True,
+            role="reviewer", teach_role="writer",
+            extract_output=my_extract_out, learn_when=lambda i, o: True,
         )
         def agent(prompt: str) -> ReviewResult:
             return ReviewResult(score=2, issues="unclear thesis")
 
         agent._evoskill_store._path = _store_path(tmp_path)
         agent("check essay")
+        store = agent._evoskill_store
+        assert store.pending_buffer_count == 1
+        assert "writer" in store._buffers
+        assert "unclear thesis" in store._buffers["writer"].items[0]["reviewer_feedback"]
 
-        mock_synth.assert_called_once()
-        assert mock_synth.call_args[0][0] == "writer"
-        assert "unclear thesis" in mock_synth.call_args[0][2]
+
+# ---------------------------------------------------------------------------
+# batch_size and flush
+# ---------------------------------------------------------------------------
+
+
+class TestBatchSizeAndFlush:
+    def test_default_batch_size_is_10(self, tmp_path: Path) -> None:
+        @evoskill(role="dev")
+        def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        with pytest.raises(ValueError):
+            agent("test")
+
+        buf = agent._evoskill_store._buffers["dev"]
+        assert buf.batch_size == 10
+
+    def test_custom_batch_size(self, tmp_path: Path) -> None:
+        @evoskill(role="dev", batch_size=3)
+        def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                agent("test")
+
+        assert agent._evoskill_store.pending_buffer_count == 2
+
+    @patch("evoskill.synthesizer.synthesize_skill_batch")
+    def test_auto_flush_at_batch_size(self, mock_batch, tmp_path: Path) -> None:
+        mock_batch.return_value = []
+
+        @evoskill(role="dev", batch_size=2)
+        def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+
+        with pytest.raises(ValueError):
+            agent("first")
+        mock_batch.assert_not_called()
+        assert agent._evoskill_store.pending_buffer_count == 1
+
+        with pytest.raises(ValueError):
+            agent("second")
+        mock_batch.assert_called_once()
+        assert agent._evoskill_store.pending_buffer_count == 0
+
+    @patch("evoskill.synthesizer.synthesize_skill_batch")
+    def test_sync_flush_drains_buffer(self, mock_batch, tmp_path: Path) -> None:
+        mock_batch.return_value = []
+
+        @evoskill(role="dev", batch_size=10)
+        def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        for _ in range(3):
+            with pytest.raises(ValueError):
+                agent("test")
+
+        assert agent._evoskill_store.pending_buffer_count == 3
+        agent.flush()
+        mock_batch.assert_called_once()
+        assert agent._evoskill_store.pending_buffer_count == 0
+
+    @patch("evoskill.synthesizer.asynthesize_skill_batch")
+    def test_async_flush_drains_buffer(self, mock_batch, tmp_path: Path) -> None:
+        async def _return_empty(*a, **kw):
+            return []
+
+        mock_batch.side_effect = _return_empty
+
+        @evoskill(role="dev", batch_size=10)
+        async def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        for _ in range(3):
+            with pytest.raises(ValueError):
+                asyncio.get_event_loop().run_until_complete(agent("test"))
+
+        assert agent._evoskill_store.pending_buffer_count == 3
+        asyncio.get_event_loop().run_until_complete(agent.flush())
+        mock_batch.assert_called_once()
+        assert agent._evoskill_store.pending_buffer_count == 0
+
+    @patch("evoskill.synthesizer.synthesize_skill_batch")
+    def test_flush_on_store_directly(self, mock_batch, tmp_path: Path) -> None:
+        mock_batch.return_value = []
+
+        store = SkillStore(storage_path=_store_path(tmp_path))
+        store._buffer_item(
+            "dev",
+            {"input_prompt": "p", "agent_output": "a", "reviewer_feedback": "f"},
+            llm=lambda msgs: "1. skill",
+            batch_size=10,
+        )
+        assert store.pending_buffer_count == 1
+        store.flush()
+        mock_batch.assert_called_once()
+        assert store.pending_buffer_count == 0
+
+    @patch("evoskill.synthesizer.synthesize_skill_batch")
+    def test_flush_empty_buffer_is_noop(self, mock_batch, tmp_path: Path) -> None:
+        store = SkillStore(storage_path=_store_path(tmp_path))
+        store.flush()
+        mock_batch.assert_not_called()
+
+    @patch("evoskill.synthesizer.synthesize_skill_batch")
+    def test_system_prompt_propagates_to_batch(self, mock_batch, tmp_path: Path) -> None:
+        mock_batch.return_value = []
+
+        @evoskill(role="dev", system_prompt="Be terse.", batch_size=2)
+        def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                agent("test")
+
+        mock_batch.assert_called_once()
+        assert mock_batch.call_args.kwargs.get("system_prompt") == "Be terse."
+
+    @patch("evoskill.synthesizer.synthesize_skill_batch")
+    def test_user_template_propagates_to_batch(self, mock_batch, tmp_path: Path) -> None:
+        mock_batch.return_value = []
+
+        @evoskill(role="dev", user_template="Custom: {role} {items_text} {existing_skills}", batch_size=2)
+        def agent(prompt: str) -> str:
+            raise ValueError("fail")
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                agent("test")
+
+        mock_batch.assert_called_once()
+        assert mock_batch.call_args.kwargs.get("user_template") == "Custom: {role} {items_text} {existing_skills}"
+
+    def test_wrapper_has_flush_attribute(self, tmp_path: Path) -> None:
+        @evoskill(role="dev")
+        def sync_agent(prompt: str) -> str:
+            return prompt
+
+        @evoskill(role="dev")
+        async def async_agent(prompt: str) -> str:
+            return prompt
+
+        assert hasattr(sync_agent, "flush")
+        assert hasattr(async_agent, "flush")
+        assert callable(sync_agent.flush)
+        assert callable(async_agent.flush)

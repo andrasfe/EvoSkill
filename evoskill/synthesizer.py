@@ -450,6 +450,7 @@ def synthesize_skill_batch(
     llm: LLMCallable | None = None,
     tags: list[str] | None = None,
     system_prompt: str | None = None,
+    user_template: str | None = None,
     deduplicate: bool = True,
     similarity_threshold: float = 0.85,
     embed: EmbeddingCallable | None = None,
@@ -467,12 +468,13 @@ def synthesize_skill_batch(
 
     sys_prompt = system_prompt or _BATCH_SYSTEM_PROMPT
     items_text = _format_batch_items(items)
+    usr_template = user_template or _BATCH_USER_TEMPLATE
 
     messages: list[dict[str, str]] = [
         {"role": "system", "content": sys_prompt},
         {
             "role": "user",
-            "content": _BATCH_USER_TEMPLATE.format(
+            "content": usr_template.format(
                 role=role,
                 items_text=items_text,
                 existing_skills=existing_text,
@@ -521,6 +523,7 @@ async def asynthesize_skill_batch(
     llm: AsyncLLMCallable | None = None,
     tags: list[str] | None = None,
     system_prompt: str | None = None,
+    user_template: str | None = None,
     deduplicate: bool = True,
     similarity_threshold: float = 0.85,
     embed: AsyncEmbeddingCallable | EmbeddingCallable | None = None,
@@ -533,12 +536,13 @@ async def asynthesize_skill_batch(
 
     sys_prompt = system_prompt or _BATCH_SYSTEM_PROMPT
     items_text = _format_batch_items(items)
+    usr_template = user_template or _BATCH_USER_TEMPLATE
 
     messages: list[dict[str, str]] = [
         {"role": "system", "content": sys_prompt},
         {
             "role": "user",
-            "content": _BATCH_USER_TEMPLATE.format(
+            "content": usr_template.format(
                 role=role,
                 items_text=items_text,
                 existing_skills=existing_text,
