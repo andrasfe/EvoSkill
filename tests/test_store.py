@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -11,8 +11,11 @@ from evoskill.backend import FileBackend, StorageBackend
 from evoskill.skill import Skill
 from evoskill.store import SkillStore
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-@pytest.fixture()
+
+@pytest.fixture
 def store(tmp_path: Path) -> SkillStore:
     return SkillStore(storage_path=tmp_path)
 

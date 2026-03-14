@@ -5,12 +5,15 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from .backend import FileBackend, StorageBackend
 from .config import get_storage_path
 from .skill import Skill
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
 
 @dataclass

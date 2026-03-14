@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import inspect
 import traceback
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
-from .skill import Skill
 from .store import SkillStore
 from .synthesizer import AsyncLLMCallable, LLMCallable, asynthesize_skill, synthesize_skill
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from .skill import Skill
 
 _INJECTION_HEADER = "[EvoSkill] Learned skills for this role:"
 
@@ -220,17 +225,17 @@ def evoskill(
 
         def _buffer_kwargs() -> dict:
             """Common kwargs for ``_buffer_item`` / ``_abuffer_item``."""
-            return dict(
-                llm=llm, tags=tags, system_prompt=system_prompt,
-                user_template=user_template, batch_size=batch_size,
-            )
+            return {
+                "llm": llm, "tags": tags, "system_prompt": system_prompt,
+                "user_template": user_template, "batch_size": batch_size,
+            }
 
         def _after_success(
             resolved_role: str, original_prompt: str, result: Any,
         ) -> None:
             if learn_when is not None and learn_when(original_prompt, result):
                 output_text = _extract_output_text(result)
-                try:
+                with contextlib.suppress(Exception):
                     store._buffer_item(
                         _learning_role(resolved_role),
                         {"input_prompt": original_prompt,
@@ -238,8 +243,6 @@ def evoskill(
                          "reviewer_feedback": output_text},
                         **_buffer_kwargs(),
                     )
-                except Exception:
-                    pass
 
         def _after_failure(
             resolved_role: str, original_prompt: str, exc: Exception,
@@ -247,7 +250,7 @@ def evoskill(
             failure_text = "\n".join(
                 traceback.format_exception(type(exc), exc, exc.__traceback__),
             )
-            try:
+            with contextlib.suppress(Exception):
                 store._buffer_item(
                     _learning_role(resolved_role),
                     {"input_prompt": original_prompt,
@@ -255,15 +258,13 @@ def evoskill(
                      "reviewer_feedback": failure_text},
                     **_buffer_kwargs(),
                 )
-            except Exception:
-                pass
 
         async def _aafter_success(
             resolved_role: str, original_prompt: str, result: Any,
         ) -> None:
             if learn_when is not None and learn_when(original_prompt, result):
                 output_text = _extract_output_text(result)
-                try:
+                with contextlib.suppress(Exception):
                     await store._abuffer_item(
                         _learning_role(resolved_role),
                         {"input_prompt": original_prompt,
@@ -271,8 +272,6 @@ def evoskill(
                          "reviewer_feedback": output_text},
                         **_buffer_kwargs(),
                     )
-                except Exception:
-                    pass
 
         async def _aafter_failure(
             resolved_role: str, original_prompt: str, exc: Exception,
@@ -280,7 +279,7 @@ def evoskill(
             failure_text = "\n".join(
                 traceback.format_exception(type(exc), exc, exc.__traceback__),
             )
-            try:
+            with contextlib.suppress(Exception):
                 await store._abuffer_item(
                     _learning_role(resolved_role),
                     {"input_prompt": original_prompt,
@@ -288,8 +287,6 @@ def evoskill(
                      "reviewer_feedback": failure_text},
                     **_buffer_kwargs(),
                 )
-            except Exception:
-                pass
 
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -365,14 +362,12 @@ def _learn_from_exception(
 ) -> None:
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     failure_text = "".join(tb)
-    try:
+    with contextlib.suppress(Exception):
         synthesize_skill(
             role, prompt, failure_text, store,
             llm=llm, tags=skill_tags,
             system_prompt=system_prompt, user_template=user_template,
         )
-    except Exception:
-        pass  # don't mask the original exception
 
 
 def _learn_from_output(
@@ -385,14 +380,12 @@ def _learn_from_output(
     system_prompt: str | None = None,
     user_template: str | None = None,
 ) -> None:
-    try:
+    with contextlib.suppress(Exception):
         synthesize_skill(
             role, prompt, output_text, store,
             llm=llm, tags=skill_tags,
             system_prompt=system_prompt, user_template=user_template,
         )
-    except Exception:
-        pass
 
 
 async def _alearn_from_exception(
@@ -407,14 +400,12 @@ async def _alearn_from_exception(
 ) -> None:
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     failure_text = "".join(tb)
-    try:
+    with contextlib.suppress(Exception):
         await asynthesize_skill(
             role, prompt, failure_text, store,
             llm=llm, tags=skill_tags,
             system_prompt=system_prompt, user_template=user_template,
         )
-    except Exception:
-        pass
 
 
 async def _alearn_from_output(
@@ -427,11 +418,9 @@ async def _alearn_from_output(
     system_prompt: str | None = None,
     user_template: str | None = None,
 ) -> None:
-    try:
+    with contextlib.suppress(Exception):
         await asynthesize_skill(
             role, prompt, output_text, store,
             llm=llm, tags=skill_tags,
             system_prompt=system_prompt, user_template=user_template,
         )
-    except Exception:
-        pass

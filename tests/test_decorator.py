@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel
 
-from evoskill.decorator import evoskill, _INJECTION_HEADER
+from evoskill.decorator import _INJECTION_HEADER, evoskill
 from evoskill.store import SkillStore
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -248,7 +250,7 @@ class TestBYOLLM:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="fail"):
             agent("test")
 
         store = agent._evoskill_store
@@ -264,7 +266,7 @@ class TestBYOLLM:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="fail"):
             asyncio.get_event_loop().run_until_complete(agent("test"))
 
         store = agent._evoskill_store
@@ -402,7 +404,7 @@ class TestExtractInput:
             raise ValueError("oops")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="oops"):
             agent(AgentInput(task="my specific task"))
 
         store = agent._evoskill_store
@@ -415,7 +417,7 @@ class TestExtractInput:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="fail"):
             agent({"key": "val"})
 
         store = agent._evoskill_store
@@ -431,7 +433,7 @@ class TestExtractInput:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="fail"):
             agent({"key": "val"}, mode="fast")
 
         store = agent._evoskill_store
@@ -508,7 +510,7 @@ class TestTeachRole:
             raise ValueError("bad")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="bad"):
             agent("review this")
 
         store = agent._evoskill_store
@@ -546,7 +548,7 @@ class TestTeachRole:
             raise ValueError("err")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="err"):
             agent("test")
 
         store = agent._evoskill_store
@@ -569,7 +571,7 @@ class TestAsyncNonBlocking:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="fail"):
             asyncio.get_event_loop().run_until_complete(agent("test"))
 
         store = agent._evoskill_store
@@ -598,7 +600,7 @@ class TestIsMethod:
     def test_is_method_true_skips_self(self, tmp_path: Path) -> None:
         class Agent:
             @evoskill(role="Agent", is_method=True)
-            def run(this_is_not_self, prompt: str) -> str:
+            def run(self, prompt: str) -> str:
                 return prompt
 
         obj = Agent()
@@ -634,12 +636,12 @@ class TestIsMethod:
     def test_is_method_true_resolves_role_from_class(self, tmp_path: Path) -> None:
         class Reviewer:
             @evoskill(is_method=True)
-            def check(this, prompt: str) -> str:
+            def check(self, prompt: str) -> str:
                 raise ValueError("err")
 
         obj = Reviewer()
         obj.check._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="err"):
             obj.check("test")
 
         store = obj.check._evoskill_store
@@ -665,7 +667,7 @@ class TestCombinedFeatures:
             raise ValueError("bad writing")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="bad writing"):
             agent(AgentInput(task="review draft"))
 
         store = agent._evoskill_store
@@ -704,7 +706,7 @@ class TestBatchSizeAndFlush:
             raise ValueError("fail")
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="fail"):
             agent("test")
 
         buf = agent._evoskill_store._buffers["dev"]
@@ -717,7 +719,7 @@ class TestBatchSizeAndFlush:
 
         agent._evoskill_store._path = _store_path(tmp_path)
         for _ in range(2):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="fail"):
                 agent("test")
 
         assert agent._evoskill_store.pending_buffer_count == 2
@@ -732,12 +734,12 @@ class TestBatchSizeAndFlush:
 
         agent._evoskill_store._path = _store_path(tmp_path)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="fail"):
             agent("first")
         mock_batch.assert_not_called()
         assert agent._evoskill_store.pending_buffer_count == 1
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="fail"):
             agent("second")
         mock_batch.assert_called_once()
         assert agent._evoskill_store.pending_buffer_count == 0
@@ -752,7 +754,7 @@ class TestBatchSizeAndFlush:
 
         agent._evoskill_store._path = _store_path(tmp_path)
         for _ in range(3):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="fail"):
                 agent("test")
 
         assert agent._evoskill_store.pending_buffer_count == 3
@@ -773,7 +775,7 @@ class TestBatchSizeAndFlush:
 
         agent._evoskill_store._path = _store_path(tmp_path)
         for _ in range(3):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="fail"):
                 asyncio.get_event_loop().run_until_complete(agent("test"))
 
         assert agent._evoskill_store.pending_buffer_count == 3
@@ -813,7 +815,7 @@ class TestBatchSizeAndFlush:
 
         agent._evoskill_store._path = _store_path(tmp_path)
         for _ in range(2):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="fail"):
                 agent("test")
 
         mock_batch.assert_called_once()
@@ -829,7 +831,7 @@ class TestBatchSizeAndFlush:
 
         agent._evoskill_store._path = _store_path(tmp_path)
         for _ in range(2):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="fail"):
                 agent("test")
 
         mock_batch.assert_called_once()
