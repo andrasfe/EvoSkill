@@ -1,6 +1,6 @@
 # EvoSkill
 
-**EvoSkill** is a lightweight Python library that enables any AI agent to learn skills at runtime. Wrap your agent function with the `@evoskill` decorator and the library will automatically capture failures, synthesize concise skills via any LLM you provide, and inject them into future calls — so the agent improves over time without manual prompt engineering. Bring your own LLM, use structured inputs, learn from cross-agent reviews, and scope skills by tags.
+**EvoSkill** is a lightweight Python library that enables any AI agent to learn skills at runtime. Use the `SkillStore` directly for full control, or wrap your agent function with the `@evoskill` decorator for automatic skill injection. The library captures failures, synthesizes concise skills via any LLM you provide, and injects them into future calls — so the agent improves over time without manual prompt engineering.
 
 ## Installation
 
@@ -15,6 +15,29 @@ pip install -e .
 ```
 
 ## Quick Start
+
+### Using `SkillStore` (recommended for structured-input agents)
+
+```python
+from evoskill import SkillStore
+
+store = SkillStore()
+
+# Get the formatted skill block ready to paste into any prompt
+skills_text = store.get_skills_text("analyst", tags=["finance"], max_skills=10)
+prompt = skills_text + my_actual_prompt
+
+# Learn from cross-agent feedback
+store.learn_from_feedback(
+    role="analyst",
+    llm=my_llm,
+    input_prompt="Summarize Q4",
+    agent_output="Revenue was good.",
+    reviewer_feedback="Too vague — include numbers.",
+)
+```
+
+### Using the `@evoskill` decorator
 
 ```python
 from evoskill import evoskill
@@ -50,6 +73,17 @@ def write_report(prompt: str) -> str:
     ...
 ```
 
+Async LLMs are also supported — the decorator's async wrapper will `await` them instead of blocking:
+
+```python
+async def my_async_llm(messages: list[dict[str, str]]) -> str:
+    ...
+
+@evoskill(role="writer", llm=my_async_llm)
+async def write_report(prompt: str) -> str:
+    ...
+```
+
 If you don't pass `llm`, EvoSkill falls back to the built-in OpenAI adapter using `EVOSKILL_API_SKILL` from your `.env`.
 
 ## Configuration
@@ -64,6 +98,101 @@ EVOSKILL_MODEL=gpt-4o-mini       # model for default adapter (default: gpt-4o-mi
 
 ## API Reference
 
+### `SkillStore` — primary API
+
+```python
+from evoskill import SkillStore
+
+store = SkillStore()                          # uses FileBackend by default
+store = SkillStore(backend=my_redis_backend)  # or bring your own backend
+```
+
+#### Skill retrieval
+
+```python
+store.get_skills("analyst")                     # all enabled skills
+store.get_skills("analyst", tags=["data"])       # filtered by tag
+store.get_skills_text("analyst", tags=["data"], max_skills=10)  # formatted block
+store.list_roles()                               # ["analyst"]
+```
+
+`get_skills_text()` returns the formatted skill block ready to paste into a prompt section — no need to reimplement formatting.
+
+#### Adding skills
+
+```python
+store.add_manual_skill("analyst", "always validate input", tags=["data"])
+store.add_skill(Skill(role="analyst", content="...", source="learned"))
+```
+
+#### Lifecycle
+
+```python
+store.disable_skill("analyst", "some skill")     # soft-delete
+store.enable_skill("analyst", "some skill")      # re-enable
+store.remove_skill("analyst", "old skill")       # hard-delete
+```
+
+#### Cross-agent feedback learning
+
+```python
+store.learn_from_feedback(
+    role="writer",
+    llm=my_llm,
+    input_prompt="write a summary",
+    agent_output="The report shows...",
+    reviewer_feedback="Too vague — include specific numbers",
+    tags=["review"],
+    system_prompt="You are a documentation expert.",   # optional override
+    user_template="Custom template: {role} {feedback}", # optional override
+)
+```
+
+#### Batch feedback ingestion
+
+Send multiple feedback items in one LLM call for lower latency and cross-issue context:
+
+```python
+items = [
+    {"input_prompt": "...", "agent_output": "...", "reviewer_feedback": "..."},
+    {"input_prompt": "...", "agent_output": "...", "reviewer_feedback": "..."},
+]
+skills = store.learn_from_feedback_batch(role="writer", llm=my_llm, items=items)
+```
+
+Async variant: `await store.alearn_from_feedback_batch(...)`.
+
+#### Skill effectiveness tracking
+
+Track which skills actually help and prune the ones that don't:
+
+```python
+store.mark_hit("writer", "Always include numbers in summaries.")   # skill helped
+store.mark_miss("writer", "Always include numbers in summaries.")  # skill didn't help
+
+# Consolidate and drop zero-hit skills
+store.consolidate("writer", llm=my_llm, max_skills=10, drop_zero_hit=True)
+```
+
+Each `Skill` has a `hit_rate` property: `skill.hit_rate  # 0.0 – 1.0`.
+
+#### Consolidation
+
+```python
+store.consolidate("analyst", llm=my_llm, max_skills=10, drop_zero_hit=True)
+```
+
+Merges duplicates, removes contradictions, and prefers skills with higher hit rates.
+
+#### Export / import
+
+Ship a baseline skill set with a deployment, seed from a previous run, or sync across environments:
+
+```python
+data = store.export_skills("analyst")         # list[dict]
+store.import_skills("analyst", data)          # appends to existing
+```
+
 ### `@evoskill(...)` decorator
 
 ```python
@@ -75,6 +204,8 @@ EVOSKILL_MODEL=gpt-4o-mini       # model for default adapter (default: gpt-4o-mi
     llm=my_llm,
     tags=["python", "data"],
     max_skills=10,
+    system_prompt="You are a code reviewer.",
+    user_template="Custom: {role} {feedback}",
 )
 ```
 
@@ -87,38 +218,8 @@ EVOSKILL_MODEL=gpt-4o-mini       # model for default adapter (default: gpt-4o-mi
 | `llm` | `Callable \| None` | LLM callable `(messages) -> str` for synthesis. Default: built-in OpenAI adapter. |
 | `tags` | `list[str] \| None` | Tags for scoping skill retrieval and storage. |
 | `max_skills` | `int \| None` | Max number of skills to inject (most recent). |
-
-### `SkillStore`
-
-```python
-from evoskill import SkillStore
-
-store = SkillStore()
-
-# Basic CRUD
-store.add_manual_skill("analyst", "always validate input", tags=["data"])
-store.get_skills("analyst")                     # all enabled skills
-store.get_skills("analyst", tags=["data"])       # filtered by tag
-store.list_roles()                               # ["analyst"]
-
-# Lifecycle
-store.disable_skill("analyst", "some skill")     # soft-delete
-store.enable_skill("analyst", "some skill")      # re-enable
-store.remove_skill("analyst", "old skill")       # hard-delete
-
-# Consolidation (deduplicate / merge via LLM)
-store.consolidate("analyst", llm=my_llm, max_skills=10)
-
-# Cross-agent feedback learning
-store.learn_from_feedback(
-    role="writer",
-    llm=my_llm,
-    input_prompt="write a summary",
-    agent_output="The report shows...",
-    reviewer_feedback="Too vague — include specific numbers",
-    tags=["review"],
-)
-```
+| `system_prompt` | `str \| None` | Override the system prompt used during skill synthesis. |
+| `user_template` | `str \| None` | Override the user template used during skill synthesis. |
 
 ### `Skill` model
 
@@ -131,9 +232,47 @@ Skill(
     source="learned",       # 'manual' | 'learned'
     tags=["python"],        # scoping tags
     enabled=True,           # can be disabled
+    hit_count=0,            # effectiveness tracking
+    miss_count=0,
     created_at=datetime,    # auto-set to now (UTC)
 )
+
+skill.hit_rate  # float: 0.0 – 1.0
 ```
+
+### Storage backend protocol
+
+The default `FileBackend` persists skills as JSON files with `filelock` for process safety. Provide your own backend for SQLite, Redis, or any other storage:
+
+```python
+from evoskill import StorageBackend, FileBackend, SkillStore
+
+class RedisBackend:
+    def read(self, role: str) -> list[Skill]: ...
+    def write(self, role: str, skills: list[Skill]) -> None: ...
+    def lock(self, role: str) -> ContextManager: ...
+    def list_roles(self) -> list[str]: ...
+
+store = SkillStore(backend=RedisBackend())
+```
+
+### Pluggable synthesis prompts
+
+Different agent roles need different synthesis framing. Override the system prompt and/or user template on any synthesis call:
+
+```python
+store.learn_from_feedback(
+    role="doc_writer",
+    llm=my_llm,
+    input_prompt="...",
+    agent_output="...",
+    reviewer_feedback="...",
+    system_prompt="You extract documentation-writing best practices.",
+    user_template="Role: {role}\nFeedback: {feedback}\nExisting: {existing_skills}",
+)
+```
+
+Defaults are available as `DEFAULT_SYSTEM_PROMPT` and `DEFAULT_USER_TEMPLATE` for reference.
 
 ## Structured Inputs
 
@@ -141,7 +280,6 @@ If your agent takes structured input (not a plain string), use `inject_skills` t
 
 ```python
 def my_injector(args, kwargs, skills_text):
-    # Put skills into the system_prompt kwarg
     kwargs = {**kwargs, "system_prompt": skills_text + kwargs.get("system_prompt", "")}
     return args, kwargs
 
@@ -150,39 +288,12 @@ def plan(task: dict, system_prompt: str = "") -> str:
     ...
 ```
 
-## Cross-Agent Feedback
-
-When Agent B reviews Agent A's work, feed the structured feedback back as a learning signal:
-
-```python
-from evoskill import SkillStore
-
-store = SkillStore()
-store.learn_from_feedback(
-    role="writer",
-    llm=my_llm,
-    input_prompt="Summarize Q4 results",
-    agent_output="Revenue was good this quarter.",
-    reviewer_feedback="Too vague. Include revenue figures and YoY comparison.",
-    tags=["finance", "review"],
-)
-```
-
-## Skill Lifecycle
-
-Prevent skill bloat with consolidation, disabling, and removal:
+Or skip the decorator entirely and use `SkillStore.get_skills_text()` directly:
 
 ```python
 store = SkillStore()
-
-# Merge/deduplicate all skills for a role
-store.consolidate("analyst", llm=my_llm, max_skills=10)
-
-# Disable a skill that isn't helping
-store.disable_skill("analyst", "outdated advice")
-
-# Hard-remove
-store.remove_skill("analyst", "bad skill")
+skills_text = store.get_skills_text("planner", tags=["infra"])
+my_agent.run(system_prompt=skills_text + base_prompt)
 ```
 
 ## Tag-Based Scoping

@@ -1,30 +1,40 @@
-"""SkillStore — persist and load skills to disk (process-safe)."""
+"""SkillStore — primary API for skill management."""
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from filelock import FileLock
-
+from .backend import FileBackend, StorageBackend
 from .config import get_storage_path
 from .skill import Skill
 
+_INJECTION_HEADER = "[EvoSkill] Learned skills for this role:"
+
 
 class SkillStore:
-    """Process-safe, file-backed store for skills.
+    """Primary API for storing, retrieving, and managing skills.
 
-    Uses ``filelock`` for cross-process safety so multiple workers can
-    read/write the same storage directory without races.
+    Accepts an optional *backend* that implements the
+    :class:`~evoskill.backend.StorageBackend` protocol.  When ``None``,
+    a :class:`~evoskill.backend.FileBackend` is used with the path from
+    ``EVOSKILL_STORAGE_PATH`` (or *storage_path*).
     """
 
-    def __init__(self, storage_path: Path | None = None) -> None:
-        self._path = storage_path or get_storage_path()
-        self._path.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        storage_path: Path | None = None,
+        *,
+        backend: StorageBackend | None = None,
+    ) -> None:
+        if backend is not None:
+            self._backend = backend
+        else:
+            path = storage_path or get_storage_path()
+            self._backend = FileBackend(path)
 
-    # -- public API ----------------------------------------------------------
+    # -- read / query --------------------------------------------------------
 
     def get_skills(
         self,
@@ -39,8 +49,8 @@ class SkillStore:
         of the requested tags are returned.  Disabled skills are excluded by
         default (pass ``enabled_only=False`` to include them).
         """
-        with self._lock_for(role):
-            skills = self._read_role(role)
+        with self._backend.lock(role):
+            skills = self._backend.read(role)
         if enabled_only:
             skills = [s for s in skills if s.enabled]
         if tags:
@@ -48,12 +58,39 @@ class SkillStore:
             skills = [s for s in skills if tag_set.issubset(s.tags)]
         return skills
 
+    def get_skills_text(
+        self,
+        role: str,
+        *,
+        tags: list[str] | None = None,
+        max_skills: int | None = None,
+    ) -> str:
+        """Return the formatted skill block ready to paste into a prompt.
+
+        Returns an empty string if there are no matching skills.
+        """
+        skills = self.get_skills(role, tags=tags)
+        if max_skills is not None:
+            skills = skills[-max_skills:]
+        if not skills:
+            return ""
+        lines = [_INJECTION_HEADER]
+        for s in skills:
+            lines.append(f"- {s.content}")
+        return "\n".join(lines) + "\n\n"
+
+    def list_roles(self) -> list[str]:
+        """Return roles that have at least one stored skill."""
+        return self._backend.list_roles()
+
+    # -- write ---------------------------------------------------------------
+
     def add_skill(self, skill: Skill) -> None:
         """Persist a single skill."""
-        with self._lock_for(skill.role):
-            skills = self._read_role(skill.role)
+        with self._backend.lock(skill.role):
+            skills = self._backend.read(skill.role)
             skills.append(skill)
-            self._write_role(skill.role, skills)
+            self._backend.write(skill.role, skills)
 
     def add_manual_skill(
         self,
@@ -67,17 +104,19 @@ class SkillStore:
             Skill(role=role, content=content, source="manual", tags=tags or [])
         )
 
+    # -- lifecycle -----------------------------------------------------------
+
     def remove_skill(self, role: str, content: str) -> bool:
         """Remove the first skill matching *content* for *role*.
 
         Returns ``True`` if a skill was removed.
         """
-        with self._lock_for(role):
-            skills = self._read_role(role)
+        with self._backend.lock(role):
+            skills = self._backend.read(role)
             for i, s in enumerate(skills):
                 if s.content == content:
                     skills.pop(i)
-                    self._write_role(role, skills)
+                    self._backend.write(role, skills)
                     return True
         return False
 
@@ -86,12 +125,12 @@ class SkillStore:
 
         Returns ``True`` if a skill was disabled.
         """
-        with self._lock_for(role):
-            skills = self._read_role(role)
+        with self._backend.lock(role):
+            skills = self._backend.read(role)
             for s in skills:
                 if s.content == content and s.enabled:
                     s.enabled = False
-                    self._write_role(role, skills)
+                    self._backend.write(role, skills)
                     return True
         return False
 
@@ -100,18 +139,46 @@ class SkillStore:
 
         Returns ``True`` if a skill was enabled.
         """
-        with self._lock_for(role):
-            skills = self._read_role(role)
+        with self._backend.lock(role):
+            skills = self._backend.read(role)
             for s in skills:
                 if s.content == content and not s.enabled:
                     s.enabled = True
-                    self._write_role(role, skills)
+                    self._backend.write(role, skills)
                     return True
         return False
 
-    def list_roles(self) -> list[str]:
-        """Return roles that have at least one stored skill."""
-        return [p.stem for p in sorted(self._path.glob("*.json"))]
+    # -- effectiveness tracking ----------------------------------------------
+
+    def mark_hit(self, role: str, content: str) -> bool:
+        """Record that a skill demonstrably prevented a repeat failure.
+
+        Returns ``True`` if the skill was found and updated.
+        """
+        with self._backend.lock(role):
+            skills = self._backend.read(role)
+            for s in skills:
+                if s.content == content:
+                    s.hit_count += 1
+                    self._backend.write(role, skills)
+                    return True
+        return False
+
+    def mark_miss(self, role: str, content: str) -> bool:
+        """Record that a skill did NOT help — the failure repeated.
+
+        Returns ``True`` if the skill was found and updated.
+        """
+        with self._backend.lock(role):
+            skills = self._backend.read(role)
+            for s in skills:
+                if s.content == content:
+                    s.miss_count += 1
+                    self._backend.write(role, skills)
+                    return True
+        return False
+
+    # -- consolidation -------------------------------------------------------
 
     def consolidate(
         self,
@@ -119,21 +186,36 @@ class SkillStore:
         llm: Callable[[list[dict[str, str]]], str],
         *,
         max_skills: int | None = None,
+        drop_zero_hit: bool = False,
     ) -> list[Skill]:
         """Deduplicate / merge skills for *role* using the provided *llm*.
 
-        *llm* is a callable that accepts a list of ``{"role": ..., "content": ...}``
-        message dicts (chat-style) and returns a plain string response.
-
-        If *max_skills* is given the LLM is asked to keep at most that many
-        skills.  The consolidated list replaces whatever was on disk.
+        If *drop_zero_hit* is ``True``, skills with ``hit_count == 0`` **and**
+        at least one ``miss_count`` are removed before consolidation.
         """
-        with self._lock_for(role):
-            skills = self._read_role(role)
+        with self._backend.lock(role):
+            skills = self._backend.read(role)
+
+        if drop_zero_hit:
+            skills = [
+                s for s in skills
+                if not (s.hit_count == 0 and s.miss_count > 0)
+            ]
+
         if len(skills) < 2:
+            with self._backend.lock(role):
+                self._backend.write(role, skills)
             return skills
 
-        skill_list = "\n".join(f"- {s.content}" for s in skills)
+        skill_lines: list[str] = []
+        for s in skills:
+            rate_info = ""
+            total = s.hit_count + s.miss_count
+            if total > 0:
+                rate_info = f" [hit_rate={s.hit_rate:.0%}, hits={s.hit_count}, misses={s.miss_count}]"
+            skill_lines.append(f"- {s.content}{rate_info}")
+        skill_list = "\n".join(skill_lines)
+
         limit_note = (
             f" Keep at most {max_skills} skills." if max_skills else ""
         )
@@ -144,6 +226,7 @@ class SkillStore:
                     "You are a skill consolidator. Given a list of skills, "
                     "merge duplicates, remove contradictions, and return a "
                     "clean numbered list of concise skills (1-3 sentences each). "
+                    "Prefer skills with higher hit rates. "
                     "Output ONLY the numbered list, nothing else."
                     + limit_note
                 ),
@@ -157,18 +240,19 @@ class SkillStore:
         raw = llm(messages).strip()
         new_contents = _parse_numbered_list(raw)
         if not new_contents:
-            return skills  # LLM returned nothing useful, keep originals
+            return skills
 
-        # Preserve manual source tag for skills that survived consolidation
         manual_contents = {s.content for s in skills if s.source == "manual"}
         new_skills: list[Skill] = []
         for text in new_contents:
             source = "manual" if text in manual_contents else "learned"
             new_skills.append(Skill(role=role, content=text, source=source))
 
-        with self._lock_for(role):
-            self._write_role(role, new_skills)
+        with self._backend.lock(role):
+            self._backend.write(role, new_skills)
         return new_skills
+
+    # -- feedback learning ---------------------------------------------------
 
     def learn_from_feedback(
         self,
@@ -179,12 +263,10 @@ class SkillStore:
         agent_output: str,
         reviewer_feedback: str,
         tags: list[str] | None = None,
+        system_prompt: str | None = None,
+        user_template: str | None = None,
     ) -> Skill:
-        """Synthesize a skill from another agent's structured feedback.
-
-        *llm* is a callable that accepts chat-style messages and returns a
-        plain string.
-        """
+        """Synthesize a skill from another agent's structured feedback."""
         from .synthesizer import synthesize_skill_with_context
 
         return synthesize_skill_with_context(
@@ -195,6 +277,8 @@ class SkillStore:
             store=self,
             llm=llm,
             tags=tags,
+            system_prompt=system_prompt,
+            user_template=user_template,
         )
 
     async def alearn_from_feedback(
@@ -206,11 +290,10 @@ class SkillStore:
         agent_output: str,
         reviewer_feedback: str,
         tags: list[str] | None = None,
+        system_prompt: str | None = None,
+        user_template: str | None = None,
     ) -> Skill:
-        """Async version of :meth:`learn_from_feedback`.
-
-        *llm* is an async callable ``async (messages) -> str``.
-        """
+        """Async version of :meth:`learn_from_feedback`."""
         from .synthesizer import asynthesize_skill_with_context
 
         return await asynthesize_skill_with_context(
@@ -221,32 +304,93 @@ class SkillStore:
             store=self,
             llm=llm,
             tags=tags,
+            system_prompt=system_prompt,
+            user_template=user_template,
         )
 
-    # -- internals -----------------------------------------------------------
+    # -- batch feedback ------------------------------------------------------
 
-    def _lock_for(self, role: str) -> FileLock:
-        """Return a cross-process file lock for the given role."""
-        return FileLock(str(self._path / f".{role}.lock"))
+    def learn_from_feedback_batch(
+        self,
+        role: str,
+        llm: Callable[[list[dict[str, str]]], str],
+        *,
+        items: list[dict[str, str]],
+        tags: list[str] | None = None,
+        system_prompt: str | None = None,
+    ) -> list[Skill]:
+        """Synthesize multiple skills from a batch of feedback items in one LLM call.
 
-    def _role_file(self, role: str) -> Path:
-        return self._path / f"{role}.json"
+        *items* is a list of dicts, each with keys:
+        ``input_prompt``, ``agent_output``, ``reviewer_feedback``.
+        """
+        from .synthesizer import synthesize_skill_batch
 
-    def _read_role(self, role: str) -> list[Skill]:
-        path = self._role_file(role)
-        if not path.exists():
-            return []
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [Skill.from_dict(d) for d in data]
-
-    def _write_role(self, role: str, skills: list[Skill]) -> None:
-        path = self._role_file(role)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps([s.to_dict() for s in skills], indent=2),
-            encoding="utf-8",
+        return synthesize_skill_batch(
+            role=role,
+            items=items,
+            store=self,
+            llm=llm,
+            tags=tags,
+            system_prompt=system_prompt,
         )
-        tmp.replace(path)  # atomic on POSIX
+
+    async def alearn_from_feedback_batch(
+        self,
+        role: str,
+        llm: Callable[[list[dict[str, str]]], Awaitable[str]],
+        *,
+        items: list[dict[str, str]],
+        tags: list[str] | None = None,
+        system_prompt: str | None = None,
+    ) -> list[Skill]:
+        """Async version of :meth:`learn_from_feedback_batch`."""
+        from .synthesizer import asynthesize_skill_batch
+
+        return await asynthesize_skill_batch(
+            role=role,
+            items=items,
+            store=self,
+            llm=llm,
+            tags=tags,
+            system_prompt=system_prompt,
+        )
+
+    # -- export / import -----------------------------------------------------
+
+    def export_skills(self, role: str) -> list[dict]:
+        """Export all skills for *role* as a list of plain dicts."""
+        with self._backend.lock(role):
+            skills = self._backend.read(role)
+        return [s.to_dict() for s in skills]
+
+    def import_skills(self, role: str, data: list[dict]) -> list[Skill]:
+        """Import skills from a list of dicts (as produced by :meth:`export_skills`).
+
+        Appends to existing skills for *role*.  Returns the imported skills.
+        """
+        imported = [Skill.from_dict(d) for d in data]
+        with self._backend.lock(role):
+            existing = self._backend.read(role)
+            existing.extend(imported)
+            self._backend.write(role, existing)
+        return imported
+
+    # -- legacy compatibility ------------------------------------------------
+
+    @property
+    def _path(self) -> Path:
+        if isinstance(self._backend, FileBackend):
+            return self._backend._path
+        raise AttributeError("_path is only available with FileBackend")
+
+    @_path.setter
+    def _path(self, value: Path) -> None:
+        if isinstance(self._backend, FileBackend):
+            self._backend._path = value
+            self._backend._path.mkdir(parents=True, exist_ok=True)
+        else:
+            raise AttributeError("_path is only available with FileBackend")
 
 
 def _parse_numbered_list(text: str) -> list[str]:

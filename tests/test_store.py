@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from evoskill.backend import FileBackend, StorageBackend
 from evoskill.skill import Skill
 from evoskill.store import SkillStore
 
@@ -231,3 +232,214 @@ class TestAlearnFromFeedback:
             tags=["async", "review"],
         )
         assert skill.tags == ["async", "review"]
+
+
+# ---------------------------------------------------------------------------
+# 1. get_skills_text (SkillStore as primary API)
+# ---------------------------------------------------------------------------
+
+
+class TestGetSkillsText:
+    def test_empty_returns_empty_string(self, store: SkillStore) -> None:
+        assert store.get_skills_text("analyst") == ""
+
+    def test_returns_formatted_block(self, store: SkillStore) -> None:
+        store.add_manual_skill("analyst", "always validate")
+        store.add_manual_skill("analyst", "check nulls")
+        text = store.get_skills_text("analyst")
+        assert "[EvoSkill]" in text
+        assert "- always validate" in text
+        assert "- check nulls" in text
+        # Should end with double newline for easy concatenation
+        assert text.endswith("\n\n")
+
+    def test_max_skills_limits_output(self, store: SkillStore) -> None:
+        for i in range(5):
+            store.add_manual_skill("dev", f"skill {i}")
+        text = store.get_skills_text("dev", max_skills=2)
+        assert "skill 3" in text
+        assert "skill 4" in text
+        assert "skill 0" not in text
+
+    def test_tags_filter(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "python tip", tags=["python"])
+        store.add_manual_skill("dev", "sql tip", tags=["sql"])
+        text = store.get_skills_text("dev", tags=["python"])
+        assert "python tip" in text
+        assert "sql tip" not in text
+
+
+# ---------------------------------------------------------------------------
+# 3. Skill effectiveness tracking
+# ---------------------------------------------------------------------------
+
+
+class TestEffectivenessTracking:
+    def test_mark_hit(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "write tests")
+        assert store.mark_hit("dev", "write tests") is True
+        skills = store.get_skills("dev")
+        assert skills[0].hit_count == 1
+        assert skills[0].miss_count == 0
+
+    def test_mark_miss(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "write tests")
+        assert store.mark_miss("dev", "write tests") is True
+        skills = store.get_skills("dev")
+        assert skills[0].miss_count == 1
+
+    def test_mark_hit_nonexistent(self, store: SkillStore) -> None:
+        assert store.mark_hit("dev", "nope") is False
+
+    def test_mark_miss_nonexistent(self, store: SkillStore) -> None:
+        assert store.mark_miss("dev", "nope") is False
+
+    def test_hit_rate_property(self) -> None:
+        s = Skill(role="dev", content="x", source="learned", hit_count=3, miss_count=1)
+        assert s.hit_rate == 0.75
+
+    def test_hit_rate_zero_when_unmarked(self) -> None:
+        s = Skill(role="dev", content="x", source="learned")
+        assert s.hit_rate == 0.0
+
+    def test_consolidate_drop_zero_hit(self, store: SkillStore) -> None:
+        s1 = Skill(role="dev", content="good skill", source="learned", hit_count=5, miss_count=1)
+        s2 = Skill(role="dev", content="bad skill", source="learned", hit_count=0, miss_count=3)
+        s3 = Skill(role="dev", content="new skill", source="learned", hit_count=0, miss_count=0)
+        store.add_skill(s1)
+        store.add_skill(s2)
+        store.add_skill(s3)
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            # After dropping zero-hit s2, only s1 and s3 remain
+            return "1. good skill\n2. new skill"
+
+        result = store.consolidate("dev", fake_llm, drop_zero_hit=True)
+        contents = [s.content for s in result]
+        assert "bad skill" not in contents
+        assert "good skill" in contents
+        assert "new skill" in contents
+
+
+# ---------------------------------------------------------------------------
+# 4. Batch feedback ingestion
+# ---------------------------------------------------------------------------
+
+
+class TestBatchFeedback:
+    def test_learn_from_feedback_batch(self, store: SkillStore) -> None:
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            # Should see all items in one call
+            user_msg = messages[1]["content"]
+            assert "Item 1" in user_msg
+            assert "Item 2" in user_msg
+            return "1. Skill from item one.\n2. Skill from item two."
+
+        items = [
+            {"input_prompt": "inp1", "agent_output": "out1", "reviewer_feedback": "fb1"},
+            {"input_prompt": "inp2", "agent_output": "out2", "reviewer_feedback": "fb2"},
+        ]
+        skills = store.learn_from_feedback_batch(
+            role="writer", llm=fake_llm, items=items,
+        )
+        assert len(skills) == 2
+        assert skills[0].content == "Skill from item one."
+        assert skills[1].content == "Skill from item two."
+        assert len(store.get_skills("writer")) == 2
+
+    @pytest.mark.asyncio
+    async def test_alearn_from_feedback_batch(self, store: SkillStore) -> None:
+        async def fake_async_llm(messages: list[dict[str, str]]) -> str:
+            return "1. Async skill one.\n2. Async skill two."
+
+        items = [
+            {"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"},
+            {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
+        ]
+        skills = await store.alearn_from_feedback_batch(
+            role="writer", llm=fake_async_llm, items=items,
+        )
+        assert len(skills) == 2
+        assert len(store.get_skills("writer")) == 2
+
+
+# ---------------------------------------------------------------------------
+# 5. Storage backend protocol
+# ---------------------------------------------------------------------------
+
+
+class TestStorageBackend:
+    def test_file_backend_satisfies_protocol(self, tmp_path: Path) -> None:
+        backend = FileBackend(tmp_path / "data")
+        assert isinstance(backend, StorageBackend)
+
+    def test_custom_backend(self, tmp_path: Path) -> None:
+        """A minimal in-memory backend that satisfies the protocol."""
+        from contextlib import contextmanager
+
+        class MemoryBackend:
+            def __init__(self):
+                self._data: dict[str, list[Skill]] = {}
+
+            def read(self, role: str) -> list[Skill]:
+                return list(self._data.get(role, []))
+
+            def write(self, role: str, skills: list[Skill]) -> None:
+                self._data[role] = list(skills)
+
+            @contextmanager
+            def lock(self, role: str):
+                yield
+
+            def list_roles(self) -> list[str]:
+                return list(self._data.keys())
+
+        backend = MemoryBackend()
+        store = SkillStore(backend=backend)
+        store.add_manual_skill("dev", "test skill")
+        skills = store.get_skills("dev")
+        assert len(skills) == 1
+        assert skills[0].content == "test skill"
+        assert store.list_roles() == ["dev"]
+
+
+# ---------------------------------------------------------------------------
+# 6. Skill export/import
+# ---------------------------------------------------------------------------
+
+
+class TestExportImport:
+    def test_export_skills(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "write tests")
+        store.add_manual_skill("dev", "handle errors")
+        exported = store.export_skills("dev")
+        assert len(exported) == 2
+        assert isinstance(exported[0], dict)
+        assert exported[0]["content"] == "write tests"
+        assert exported[1]["content"] == "handle errors"
+
+    def test_import_skills(self, store: SkillStore) -> None:
+        data = [
+            {"role": "dev", "content": "imported skill", "source": "learned"},
+        ]
+        imported = store.import_skills("dev", data)
+        assert len(imported) == 1
+        assert imported[0].content == "imported skill"
+        assert len(store.get_skills("dev")) == 1
+
+    def test_round_trip(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "skill A")
+        store.add_manual_skill("dev", "skill B")
+        exported = store.export_skills("dev")
+
+        store2 = SkillStore(storage_path=store._path / "other")
+        store2.import_skills("dev", exported)
+        skills = store2.get_skills("dev")
+        assert len(skills) == 2
+        assert {s.content for s in skills} == {"skill A", "skill B"}
+
+    def test_import_appends_to_existing(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "existing")
+        data = [{"role": "dev", "content": "new one", "source": "learned"}]
+        store.import_skills("dev", data)
+        assert len(store.get_skills("dev")) == 2

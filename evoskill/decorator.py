@@ -58,6 +58,8 @@ def evoskill(
     llm: LLMCallable | AsyncLLMCallable | None = None,
     tags: list[str] | None = None,
     max_skills: int | None = None,
+    system_prompt: str | None = None,
+    user_template: str | None = None,
 ) -> Callable:
     """Decorator that adds runtime skill learning to any function/method.
 
@@ -82,6 +84,10 @@ def evoskill(
         Default tags attached to skills learned by this decorator.
     max_skills:
         If set, only the most-recent *max_skills* skills are injected.
+    system_prompt:
+        Override the default system prompt used for skill synthesis.
+    user_template:
+        Override the default user template used for skill synthesis.
     """
 
     store = SkillStore()
@@ -106,10 +112,9 @@ def evoskill(
             resolved_role = _resolve_role(func, role, is_method, args)
             _ensure_manual_skills(resolved_role)
 
-            all_skills = store.get_skills(resolved_role, tags=tags)
-            if max_skills is not None:
-                all_skills = all_skills[-max_skills:]
-            skills_text = _build_skill_block(all_skills)
+            skills_text = store.get_skills_text(
+                resolved_role, tags=tags, max_skills=max_skills,
+            )
 
             # Determine original prompt for synthesis context
             prompt_idx = 1 if is_method else 0
@@ -131,6 +136,7 @@ def evoskill(
             if learn_when is not None and learn_when(original_prompt, result):
                 _learn_from_output(
                     resolved_role, original_prompt, result, store, llm, tags,
+                    system_prompt, user_template,
                 )
 
         def _after_failure(
@@ -138,6 +144,7 @@ def evoskill(
         ) -> None:
             _learn_from_exception(
                 resolved_role, original_prompt, exc, store, llm, tags,
+                system_prompt, user_template,
             )
 
         async def _aafter_success(
@@ -146,6 +153,7 @@ def evoskill(
             if learn_when is not None and learn_when(original_prompt, result):
                 await _alearn_from_output(
                     resolved_role, original_prompt, result, store, llm, tags,
+                    system_prompt, user_template,
                 )
 
         async def _aafter_failure(
@@ -153,6 +161,7 @@ def evoskill(
         ) -> None:
             await _alearn_from_exception(
                 resolved_role, original_prompt, exc, store, llm, tags,
+                system_prompt, user_template,
             )
 
         @functools.wraps(func)
@@ -220,11 +229,17 @@ def _learn_from_exception(
     store: SkillStore,
     llm: LLMCallable | None,
     skill_tags: list[str] | None,
+    system_prompt: str | None = None,
+    user_template: str | None = None,
 ) -> None:
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     failure_text = "".join(tb)
     try:
-        synthesize_skill(role, prompt, failure_text, store, llm=llm, tags=skill_tags)
+        synthesize_skill(
+            role, prompt, failure_text, store,
+            llm=llm, tags=skill_tags,
+            system_prompt=system_prompt, user_template=user_template,
+        )
     except Exception:
         pass  # don't mask the original exception
 
@@ -236,9 +251,15 @@ def _learn_from_output(
     store: SkillStore,
     llm: LLMCallable | None,
     skill_tags: list[str] | None,
+    system_prompt: str | None = None,
+    user_template: str | None = None,
 ) -> None:
     try:
-        synthesize_skill(role, prompt, str(output), store, llm=llm, tags=skill_tags)
+        synthesize_skill(
+            role, prompt, str(output), store,
+            llm=llm, tags=skill_tags,
+            system_prompt=system_prompt, user_template=user_template,
+        )
     except Exception:
         pass
 
@@ -250,11 +271,17 @@ async def _alearn_from_exception(
     store: SkillStore,
     llm: AsyncLLMCallable | LLMCallable | None,
     skill_tags: list[str] | None,
+    system_prompt: str | None = None,
+    user_template: str | None = None,
 ) -> None:
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     failure_text = "".join(tb)
     try:
-        await asynthesize_skill(role, prompt, failure_text, store, llm=llm, tags=skill_tags)
+        await asynthesize_skill(
+            role, prompt, failure_text, store,
+            llm=llm, tags=skill_tags,
+            system_prompt=system_prompt, user_template=user_template,
+        )
     except Exception:
         pass
 
@@ -266,8 +293,14 @@ async def _alearn_from_output(
     store: SkillStore,
     llm: AsyncLLMCallable | LLMCallable | None,
     skill_tags: list[str] | None,
+    system_prompt: str | None = None,
+    user_template: str | None = None,
 ) -> None:
     try:
-        await asynthesize_skill(role, prompt, str(output), store, llm=llm, tags=skill_tags)
+        await asynthesize_skill(
+            role, prompt, str(output), store,
+            llm=llm, tags=skill_tags,
+            system_prompt=system_prompt, user_template=user_template,
+        )
     except Exception:
         pass
