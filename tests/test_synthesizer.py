@@ -10,7 +10,6 @@ import pytest
 from evoskill.store import SkillStore
 from evoskill.synthesizer import (
     DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_USER_TEMPLATE,
     asynthesize_skill,
     asynthesize_skill_batch,
     asynthesize_skill_with_context,

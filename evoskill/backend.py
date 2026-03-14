@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator, Protocol, runtime_checkable
+
+from filelock import FileLock
 
 from .skill import Skill
 
@@ -46,11 +50,6 @@ class StorageBackend(Protocol):
 # ---------------------------------------------------------------------------
 # Default file-based backend
 # ---------------------------------------------------------------------------
-
-import json
-from pathlib import Path
-
-from filelock import FileLock
 
 
 class FileBackend:
