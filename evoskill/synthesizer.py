@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from .config import get_api_key, get_model
 from .skill import Skill
+
+if TYPE_CHECKING:
+    from .store import SkillStore
 
 # ---------------------------------------------------------------------------
 # Prompt templates
