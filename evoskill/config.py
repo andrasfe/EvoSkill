@@ -30,5 +30,5 @@ def get_storage_path() -> Path:
 
 
 def get_model() -> str:
-    """Return the OpenAI model to use for skill synthesis."""
+    """Return the default model to use for skill synthesis."""
     return os.getenv("EVOSKILL_MODEL", "gpt-4o-mini")
