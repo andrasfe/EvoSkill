@@ -7,7 +7,7 @@ name = "evoskill"
 version = "0.1.0"
 description = "Lightweight runtime skill-learning for AI agents via a simple decorator."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
     "openai>=1.0",
