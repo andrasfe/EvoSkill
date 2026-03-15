@@ -290,7 +290,10 @@ def synthesize_skill_with_context(
     embed_fn = embed  # None means "skip embedding" — caller must supply a callable
     if deduplicate and existing and embed_fn is not None:
         matched = _find_duplicate(
-            feedback, existing, embed_fn, similarity_threshold,
+            feedback,
+            existing,
+            embed_fn,
+            similarity_threshold,
         )
         if matched is not None:
             # Persist any newly-computed embeddings (without overwriting unrelated skills)
@@ -325,7 +328,10 @@ def synthesize_skill_with_context(
         new_embedding = embed_fn(content)
 
     skill = Skill(
-        role=role, content=content, source="learned", tags=tags or [],
+        role=role,
+        content=content,
+        source="learned",
+        tags=tags or [],
         embedding=new_embedding,
     )
     store.add_skill(skill)
@@ -393,7 +399,10 @@ async def asynthesize_skill_with_context(
     embed_fn = embed  # None means "skip embedding"
     if deduplicate and existing and embed_fn is not None:
         matched = await _afind_duplicate(
-            feedback, existing, embed_fn, similarity_threshold,
+            feedback,
+            existing,
+            embed_fn,
+            similarity_threshold,
         )
         if matched is not None:
             store._update_embeddings(role, existing)
@@ -434,7 +443,10 @@ async def asynthesize_skill_with_context(
             new_embedding = emb_result  # type: ignore[assignment]
 
     skill = Skill(
-        role=role, content=content, source="learned", tags=tags or [],
+        role=role,
+        content=content,
+        source="learned",
+        tags=tags or [],
         embedding=new_embedding,
     )
     store.add_skill(skill)
@@ -504,7 +516,10 @@ def synthesize_skill_batch(
             new_embedding = embed_fn(text)
 
         skill = Skill(
-            role=role, content=text, source="learned", tags=tags or [],
+            role=role,
+            content=text,
+            source="learned",
+            tags=tags or [],
             embedding=new_embedding,
         )
         store.add_skill(skill)
@@ -554,7 +569,11 @@ async def asynthesize_skill_batch(
         },
     ]
 
-    raw = (await llm(messages)).strip() if llm is not None else default_openai_llm(messages).strip()
+    raw = (
+        (await llm(messages)).strip()
+        if llm is not None
+        else default_openai_llm(messages).strip()
+    )
 
     contents = _parse_numbered_list(raw)
 
@@ -564,7 +583,10 @@ async def asynthesize_skill_batch(
     for text in contents:
         if deduplicate and embed_fn is not None and existing:
             matched = await _afind_duplicate(
-                text, existing, embed_fn, similarity_threshold,
+                text,
+                existing,
+                embed_fn,
+                similarity_threshold,
             )
             if matched is not None:
                 continue
@@ -580,7 +602,10 @@ async def asynthesize_skill_batch(
                 new_embedding = emb_result  # type: ignore[assignment]
 
         skill = Skill(
-            role=role, content=text, source="learned", tags=tags or [],
+            role=role,
+            content=text,
+            source="learned",
+            tags=tags or [],
             embedding=new_embedding,
         )
         store.add_skill(skill)

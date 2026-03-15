@@ -30,6 +30,7 @@ class _RoleBuffer:
     similarity_threshold: float = 0.85
     embed: Any = None
 
+
 _INJECTION_HEADER = "[EvoSkill] Learned skills for this role:"
 
 
@@ -127,7 +128,9 @@ class SkillStore:
         with self._backend.lock(role):
             self._backend.write(role, skills)
 
-    def _update_embeddings(self, role: str, skills_with_embeddings: list[Skill]) -> None:
+    def _update_embeddings(
+        self, role: str, skills_with_embeddings: list[Skill]
+    ) -> None:
         """Merge cached embeddings back into the full (unfiltered) skill list.
 
         Reads **all** skills for *role* from the backend, updates the
@@ -258,10 +261,7 @@ class SkillStore:
             skills = self._backend.read(role)
 
         if drop_zero_hit:
-            skills = [
-                s for s in skills
-                if not (s.hit_count == 0 and s.miss_count > 0)
-            ]
+            skills = [s for s in skills if not (s.hit_count == 0 and s.miss_count > 0)]
 
         if len(skills) < 2:
             with self._backend.lock(role):
@@ -277,9 +277,7 @@ class SkillStore:
             skill_lines.append(f"- {s.content}{rate_info}")
         skill_list = "\n".join(skill_lines)
 
-        limit_note = (
-            f" Keep at most {max_skills} skills." if max_skills else ""
-        )
+        limit_note = f" Keep at most {max_skills} skills." if max_skills else ""
         messages = [
             {
                 "role": "system",
@@ -288,8 +286,7 @@ class SkillStore:
                     "merge duplicates, remove contradictions, and return a "
                     "clean numbered list of concise skills (1-3 sentences each). "
                     "Prefer skills with higher hit rates. "
-                    "Output ONLY the numbered list, nothing else."
-                    + limit_note
+                    "Output ONLY the numbered list, nothing else." + limit_note
                 ),
             },
             {
@@ -471,10 +468,14 @@ class SkillStore:
         with self._buffer_lock:
             if role not in self._buffers:
                 self._buffers[role] = _RoleBuffer(
-                    llm=llm, tags=tags, system_prompt=system_prompt,
+                    llm=llm,
+                    tags=tags,
+                    system_prompt=system_prompt,
                     user_template=user_template,
-                    batch_size=batch_size, deduplicate=deduplicate,
-                    similarity_threshold=similarity_threshold, embed=embed,
+                    batch_size=batch_size,
+                    deduplicate=deduplicate,
+                    similarity_threshold=similarity_threshold,
+                    embed=embed,
                 )
             buf = self._buffers[role]
             buf.items.append(item)
@@ -517,10 +518,14 @@ class SkillStore:
         with self._buffer_lock:
             if role not in self._buffers:
                 self._buffers[role] = _RoleBuffer(
-                    llm=llm, tags=tags, system_prompt=system_prompt,
+                    llm=llm,
+                    tags=tags,
+                    system_prompt=system_prompt,
                     user_template=user_template,
-                    batch_size=batch_size, deduplicate=deduplicate,
-                    similarity_threshold=similarity_threshold, embed=embed,
+                    batch_size=batch_size,
+                    deduplicate=deduplicate,
+                    similarity_threshold=similarity_threshold,
+                    embed=embed,
                 )
             buf = self._buffers[role]
             buf.items.append(item)

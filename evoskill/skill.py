@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 @dataclass
@@ -18,7 +18,7 @@ class Skill:
     hit_count: int = 0
     miss_count: int = 0
     embedding: list[float] | None = field(default=None, repr=False)
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def hit_rate(self) -> float:
@@ -47,7 +47,7 @@ class Skill:
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at)
         else:
-            created_at = datetime.now(timezone.utc)
+            created_at = datetime.now(UTC)
         return cls(
             role=data["role"],
             content=data["content"],
