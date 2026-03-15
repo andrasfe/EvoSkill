@@ -131,8 +131,12 @@ class TestRemoveSkill:
 class TestConsolidate:
     def test_consolidate_merges_skills(self, store: SkillStore) -> None:
         store.add_manual_skill("dev", "always write tests")
-        store.add_skill(Skill(role="dev", content="make sure to write unit tests", source="learned"))
-        store.add_skill(Skill(role="dev", content="handle errors gracefully", source="learned"))
+        store.add_skill(
+            Skill(role="dev", content="make sure to write unit tests", source="learned")
+        )
+        store.add_skill(
+            Skill(role="dev", content="handle errors gracefully", source="learned")
+        )
 
         def fake_llm(messages: list[dict[str, str]]) -> str:
             return "1. Always write unit tests.\n2. Handle errors gracefully."
@@ -306,9 +310,19 @@ class TestEffectivenessTracking:
         assert s.hit_rate == 0.0
 
     def test_consolidate_drop_zero_hit(self, store: SkillStore) -> None:
-        s1 = Skill(role="dev", content="good skill", source="learned", hit_count=5, miss_count=1)
-        s2 = Skill(role="dev", content="bad skill", source="learned", hit_count=0, miss_count=3)
-        s3 = Skill(role="dev", content="new skill", source="learned", hit_count=0, miss_count=0)
+        s1 = Skill(
+            role="dev",
+            content="good skill",
+            source="learned",
+            hit_count=5,
+            miss_count=1,
+        )
+        s2 = Skill(
+            role="dev", content="bad skill", source="learned", hit_count=0, miss_count=3
+        )
+        s3 = Skill(
+            role="dev", content="new skill", source="learned", hit_count=0, miss_count=0
+        )
         store.add_skill(s1)
         store.add_skill(s2)
         store.add_skill(s3)
@@ -339,11 +353,21 @@ class TestBatchFeedback:
             return "1. Skill from item one.\n2. Skill from item two."
 
         items = [
-            {"input_prompt": "inp1", "agent_output": "out1", "reviewer_feedback": "fb1"},
-            {"input_prompt": "inp2", "agent_output": "out2", "reviewer_feedback": "fb2"},
+            {
+                "input_prompt": "inp1",
+                "agent_output": "out1",
+                "reviewer_feedback": "fb1",
+            },
+            {
+                "input_prompt": "inp2",
+                "agent_output": "out2",
+                "reviewer_feedback": "fb2",
+            },
         ]
         skills = store.learn_from_feedback_batch(
-            role="writer", llm=fake_llm, items=items,
+            role="writer",
+            llm=fake_llm,
+            items=items,
         )
         assert len(skills) == 2
         assert skills[0].content == "Skill from item one."
@@ -360,7 +384,9 @@ class TestBatchFeedback:
             {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
         ]
         skills = await store.alearn_from_feedback_batch(
-            role="writer", llm=fake_async_llm, items=items,
+            role="writer",
+            llm=fake_async_llm,
+            items=items,
         )
         assert len(skills) == 2
         assert len(store.get_skills("writer")) == 2

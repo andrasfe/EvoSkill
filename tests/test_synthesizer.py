@@ -41,7 +41,10 @@ class TestSynthesizeSkillDefault:
     """Tests using the default OpenAI adapter (mocked)."""
 
     @patch("evoskill.synthesizer.get_api_key", return_value="sk-fake")
-    @patch("evoskill.synthesizer.default_openai_llm", return_value="Always validate JSON before parsing.")
+    @patch(
+        "evoskill.synthesizer.default_openai_llm",
+        return_value="Always validate JSON before parsing.",
+    )
     def test_calls_default_llm_and_stores_skill(
         self,
         mock_llm: MagicMock,
@@ -221,7 +224,8 @@ class TestAsynthesizeSkill:
 
     @pytest.mark.asyncio
     async def test_async_fallback_to_sync_default(
-        self, store: SkillStore,
+        self,
+        store: SkillStore,
     ) -> None:
         """When no llm is provided, falls back to the sync default_openai_llm."""
         with patch(
@@ -355,7 +359,10 @@ class TestBatchSynthesis:
             {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
         ]
         skills = synthesize_skill_batch(
-            role="dev", items=items, store=store, llm=fake_llm,
+            role="dev",
+            items=items,
+            store=store,
+            llm=fake_llm,
         )
         assert len(skills) == 2
         assert skills[0].content == "First batch skill."
@@ -370,7 +377,10 @@ class TestBatchSynthesis:
 
         items = [{"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"}]
         synthesize_skill_batch(
-            role="dev", items=items, store=store, llm=fake_llm,
+            role="dev",
+            items=items,
+            store=store,
+            llm=fake_llm,
             system_prompt="Custom batch prompt.",
         )
         assert captured[0]["content"] == "Custom batch prompt."
@@ -385,7 +395,10 @@ class TestBatchSynthesis:
             {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
         ]
         skills = await asynthesize_skill_batch(
-            role="dev", items=items, store=store, llm=fake_llm,
+            role="dev",
+            items=items,
+            store=store,
+            llm=fake_llm,
         )
         assert len(skills) == 2
         assert skills[0].content == "Async batch skill one."
@@ -396,7 +409,10 @@ class TestBatchSynthesis:
 
         items = [{"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"}]
         skills = synthesize_skill_batch(
-            role="dev", items=items, store=store, llm=fake_llm,
+            role="dev",
+            items=items,
+            store=store,
+            llm=fake_llm,
             tags=["batch", "test"],
         )
         assert skills[0].tags == ["batch", "test"]
@@ -486,7 +502,10 @@ class TestFindDuplicate:
 
         cached = _fake_embed("cached-placeholder")
         skill = Skill(
-            role="dev", content="test", source="learned", embedding=cached,
+            role="dev",
+            content="test",
+            source="learned",
+            embedding=cached,
         )
         call_count = 0
 
@@ -710,7 +729,10 @@ class TestDeduplicationBatch:
             {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
         ]
         skills = synthesize_skill_batch(
-            role="dev", items=items, store=store, llm=fake_llm,
+            role="dev",
+            items=items,
+            store=store,
+            llm=fake_llm,
             deduplicate=True,
             similarity_threshold=0.01,  # Low threshold — everything matches existing
             embed=_identical_embed,
@@ -728,7 +750,10 @@ class TestDeduplicationBatch:
         ]
         # No existing skills, so nothing to dedup against initially
         skills = synthesize_skill_batch(
-            role="dev", items=items, store=store, llm=fake_llm,
+            role="dev",
+            items=items,
+            store=store,
+            llm=fake_llm,
             deduplicate=True,
             similarity_threshold=0.9999,
             embed=_fake_embed,
@@ -748,7 +773,10 @@ class TestDeduplicationBatch:
             {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
         ]
         skills = synthesize_skill_batch(
-            role="dev", items=items, store=store, llm=fake_llm,
+            role="dev",
+            items=items,
+            store=store,
+            llm=fake_llm,
             deduplicate=False,
         )
         assert len(skills) == 2
@@ -767,7 +795,10 @@ class TestDeduplicationBatch:
             {"input_prompt": "d", "agent_output": "e", "reviewer_feedback": "f"},
         ]
         skills = await asynthesize_skill_batch(
-            role="dev", items=items, store=store, llm=fake_llm,
+            role="dev",
+            items=items,
+            store=store,
+            llm=fake_llm,
             deduplicate=True,
             similarity_threshold=0.01,
             embed=_async_identical_embed,
@@ -815,7 +846,10 @@ class TestEmbeddingCaching:
 
         embedding = [0.1, 0.2, 0.3]
         skill = Skill(
-            role="dev", content="test", source="learned", embedding=embedding,
+            role="dev",
+            content="test",
+            source="learned",
+            embedding=embedding,
         )
         d = skill.to_dict()
         assert d["embedding"] == embedding
@@ -839,13 +873,26 @@ class TestUpdateEmbeddingsNoDataLoss:
     """Verify that dedup embedding persistence does NOT overwrite skills
     with different tags, disabled skills, or skills from concurrent writes."""
 
-    def test_dedup_preserves_skills_with_different_tags(self, store: SkillStore) -> None:
+    def test_dedup_preserves_skills_with_different_tags(
+        self, store: SkillStore
+    ) -> None:
         """synthesize_skill_with_context with tags=["finance"] must not
         delete existing skills tagged ["marketing"]."""
         from evoskill.skill import Skill
 
-        store.add_skill(Skill(role="writer", content="marketing tip", source="learned", tags=["marketing"]))
-        store.add_skill(Skill(role="writer", content="finance tip", source="learned", tags=["finance"]))
+        store.add_skill(
+            Skill(
+                role="writer",
+                content="marketing tip",
+                source="learned",
+                tags=["marketing"],
+            )
+        )
+        store.add_skill(
+            Skill(
+                role="writer", content="finance tip", source="learned", tags=["finance"]
+            )
+        )
 
         result = synthesize_skill_with_context(
             role="writer",
@@ -903,8 +950,12 @@ class TestUpdateEmbeddingsNoDataLoss:
 
         from evoskill.skill import Skill
 
-        store.add_skill(Skill(role="writer", content="seo tip", source="learned", tags=["seo"]))
-        store.add_skill(Skill(role="writer", content="tone tip", source="learned", tags=["tone"]))
+        store.add_skill(
+            Skill(role="writer", content="seo tip", source="learned", tags=["seo"])
+        )
+        store.add_skill(
+            Skill(role="writer", content="tone tip", source="learned", tags=["tone"])
+        )
 
         async def run() -> Skill | None:
             return await asynthesize_skill_with_context(
@@ -932,15 +983,21 @@ class TestUpdateEmbeddingsNoDataLoss:
         when persisting embeddings."""
         from evoskill.skill import Skill
 
-        store.add_skill(Skill(role="dev", content="python tip", source="learned", tags=["python"]))
-        store.add_skill(Skill(role="dev", content="rust tip", source="learned", tags=["rust"]))
+        store.add_skill(
+            Skill(role="dev", content="python tip", source="learned", tags=["python"])
+        )
+        store.add_skill(
+            Skill(role="dev", content="rust tip", source="learned", tags=["rust"])
+        )
 
         def fake_llm(msgs: list[dict[str, str]]) -> str:
             return "1. New python skill."
 
         skills = synthesize_skill_batch(
             role="dev",
-            items=[{"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"}],
+            items=[
+                {"input_prompt": "a", "agent_output": "b", "reviewer_feedback": "c"}
+            ],
             store=store,
             llm=fake_llm,
             tags=["python"],
@@ -963,7 +1020,9 @@ class TestUpdateEmbeddingsNoDataLoss:
 
         # Simulate: we computed an embedding for skill A only
         skills_with_emb = [
-            Skill(role="dev", content="skill A", source="learned", embedding=[1.0, 0.0]),
+            Skill(
+                role="dev", content="skill A", source="learned", embedding=[1.0, 0.0]
+            ),
         ]
         store._update_embeddings("dev", skills_with_emb)
 

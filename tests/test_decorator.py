@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _store_path(tmp_path: Path) -> Path:
     p = tmp_path / "skills"
     p.mkdir(exist_ok=True)
@@ -286,8 +287,12 @@ class TestDecoratorTags:
             return prompt
 
         agent._evoskill_store._path = _store_path(tmp_path)
-        agent._evoskill_store.add_manual_skill("analyst", "tagged skill", tags=["python"])
-        agent._evoskill_store.add_manual_skill("analyst", "untagged skill", tags=["sql"])
+        agent._evoskill_store.add_manual_skill(
+            "analyst", "tagged skill", tags=["python"]
+        )
+        agent._evoskill_store.add_manual_skill(
+            "analyst", "untagged skill", tags=["sql"]
+        )
         result = agent("do analysis")
         assert "tagged skill" in result
         assert "untagged skill" not in result
@@ -467,9 +472,14 @@ class TestExtractOutput:
         agent("check code")
         store = agent._evoskill_store
         assert store.pending_buffer_count == 1
-        assert "found error in line 5" in store._buffers["coder"].items[0]["reviewer_feedback"]
+        assert (
+            "found error in line 5"
+            in store._buffers["coder"].items[0]["reviewer_feedback"]
+        )
 
-    def test_default_str_conversion_without_extract_output(self, tmp_path: Path) -> None:
+    def test_default_str_conversion_without_extract_output(
+        self, tmp_path: Path
+    ) -> None:
         @evoskill(role="dev", learn_when=lambda i, o: True)
         def agent(prompt: str) -> str:
             return "plain output"
@@ -655,13 +665,17 @@ class TestIsMethod:
 
 
 class TestCombinedFeatures:
-    def test_inject_field_with_extract_input_and_teach_role(self, tmp_path: Path) -> None:
+    def test_inject_field_with_extract_input_and_teach_role(
+        self, tmp_path: Path
+    ) -> None:
         def my_extract(input_data):
             return input_data.task
 
         @evoskill(
-            role="reviewer", teach_role="writer",
-            inject_field="skill_context", extract_input=my_extract,
+            role="reviewer",
+            teach_role="writer",
+            inject_field="skill_context",
+            extract_input=my_extract,
         )
         def agent(input_data: AgentInput) -> str:
             raise ValueError("bad writing")
@@ -680,8 +694,10 @@ class TestCombinedFeatures:
             return result.issues
 
         @evoskill(
-            role="reviewer", teach_role="writer",
-            extract_output=my_extract_out, learn_when=lambda i, o: True,
+            role="reviewer",
+            teach_role="writer",
+            extract_output=my_extract_out,
+            learn_when=lambda i, o: True,
         )
         def agent(prompt: str) -> ReviewResult:
             return ReviewResult(score=2, issues="unclear thesis")
@@ -691,7 +707,9 @@ class TestCombinedFeatures:
         store = agent._evoskill_store
         assert store.pending_buffer_count == 1
         assert "writer" in store._buffers
-        assert "unclear thesis" in store._buffers["writer"].items[0]["reviewer_feedback"]
+        assert (
+            "unclear thesis" in store._buffers["writer"].items[0]["reviewer_feedback"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -806,7 +824,9 @@ class TestBatchSizeAndFlush:
         mock_batch.assert_not_called()
 
     @patch("evoskill.synthesizer.synthesize_skill_batch")
-    def test_system_prompt_propagates_to_batch(self, mock_batch, tmp_path: Path) -> None:
+    def test_system_prompt_propagates_to_batch(
+        self, mock_batch, tmp_path: Path
+    ) -> None:
         mock_batch.return_value = []
 
         @evoskill(role="dev", system_prompt="Be terse.", batch_size=2)
@@ -822,10 +842,16 @@ class TestBatchSizeAndFlush:
         assert mock_batch.call_args.kwargs.get("system_prompt") == "Be terse."
 
     @patch("evoskill.synthesizer.synthesize_skill_batch")
-    def test_user_template_propagates_to_batch(self, mock_batch, tmp_path: Path) -> None:
+    def test_user_template_propagates_to_batch(
+        self, mock_batch, tmp_path: Path
+    ) -> None:
         mock_batch.return_value = []
 
-        @evoskill(role="dev", user_template="Custom: {role} {items_text} {existing_skills}", batch_size=2)
+        @evoskill(
+            role="dev",
+            user_template="Custom: {role} {items_text} {existing_skills}",
+            batch_size=2,
+        )
         def agent(prompt: str) -> str:
             raise ValueError("fail")
 
@@ -835,7 +861,10 @@ class TestBatchSizeAndFlush:
                 agent("test")
 
         mock_batch.assert_called_once()
-        assert mock_batch.call_args.kwargs.get("user_template") == "Custom: {role} {items_text} {existing_skills}"
+        assert (
+            mock_batch.call_args.kwargs.get("user_template")
+            == "Custom: {role} {items_text} {existing_skills}"
+        )
 
     def test_wrapper_has_flush_attribute(self, tmp_path: Path) -> None:
         @evoskill(role="dev")
