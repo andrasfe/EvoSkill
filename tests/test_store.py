@@ -721,6 +721,56 @@ class TestSemanticRetrieval:
         count = text.count("python skill")
         assert count == 2
 
+    def test_below_threshold_embeddings_persisted(self, store: SkillStore) -> None:
+        """Skills below relevance threshold should still have embeddings saved."""
+        embed_calls = []
+
+        def tracking_embed(text: str) -> list[float]:
+            embed_calls.append(text)
+            return _directional_embed(text)
+
+        store.add_manual_skill("dev", "use python type hints")
+        store.add_manual_skill("dev", "always use SQL joins")
+
+        # First call: both skills get embedded
+        store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=tracking_embed,
+            relevance_threshold=0.5,
+        )
+        first_call_count = len(embed_calls)
+        assert first_call_count >= 3  # query + 2 skills
+
+        # Second call: embeddings were persisted, so skills should NOT be
+        # re-embedded (only the query embedding is new)
+        embed_calls.clear()
+        store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=tracking_embed,
+            relevance_threshold=0.5,
+        )
+        # Only the query should be embedded, not the skills
+        assert len(embed_calls) == 1
+
+    def test_max_skills_without_embed_takes_most_recent(
+        self, store: SkillStore
+    ) -> None:
+        """max_skills without embed should take most-recent (last N), not first N."""
+        for i in range(5):
+            store.add_manual_skill("dev", f"skill {i}")
+
+        text = store.get_skills_text(
+            "dev",
+            query="anything",  # query without embed
+            max_skills=2,
+        )
+        # Without embed, no ranking happens, so last 2 skills should be returned
+        assert "skill 3" in text
+        assert "skill 4" in text
+        assert "skill 0" not in text
+
 
 # ---------------------------------------------------------------------------
 # 9. Token-budget-aware injection

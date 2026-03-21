@@ -1031,3 +1031,20 @@ class TestDecoratorSmartInjection:
         result = agent(AgentInput(task="python review"))
         assert "type hints" in result
         assert "SQL joins" not in result
+
+    def test_async_llm_compact_falls_back_to_bullets(self, tmp_path: Path) -> None:
+        """compact=True with async LLM should fall back to bullet list."""
+
+        async def async_llm(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("async LLM should not be called for compact")
+
+        @evoskill(role="dev", compact=True, llm=async_llm)
+        async def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("dev", "validate inputs")
+
+        result = asyncio.get_event_loop().run_until_complete(agent("test"))
+        # Falls back to bullet-list since llm is async
+        assert "- validate inputs" in result

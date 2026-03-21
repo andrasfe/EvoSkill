@@ -228,6 +228,15 @@ def evoskill(
             # behaviour without adding any relevance filtering.
             semantic_query = (original_prompt or None) if embed is not None else None
 
+            # compact mode requires a *sync* LLM callable (it calls
+            # llm(messages).strip()).  When the user supplies an async LLM
+            # we fall back to the bullet-list format to avoid a crash.
+            compact_llm = (
+                llm
+                if (llm is not None and not asyncio.iscoroutinefunction(llm))
+                else None
+            )
+
             skills_text = store.get_skills_text(
                 resolved_role,
                 tags=tags,
@@ -237,7 +246,7 @@ def evoskill(
                 relevance_threshold=relevance_threshold,
                 max_tokens=max_tokens,
                 compact=compact,
-                llm=llm,
+                llm=compact_llm,
             )
 
             if inject_skills is not None:

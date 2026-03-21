@@ -128,21 +128,25 @@ class SkillStore:
             return ""
 
         # -- semantic ranking ----------------------------------------------------
+        ranked = False
         if query and embed is not None:
+            all_skills = list(skills)  # snapshot before filtering
             skills = _rank_by_relevance(
                 skills,
                 query,
                 embed,
                 relevance_threshold,
             )
-            # Persist any newly-computed embeddings
-            self._update_embeddings(role, skills)
+            # Persist embeddings for ALL skills (including those below
+            # threshold) to avoid redundant embed calls on future invocations.
+            self._update_embeddings(role, all_skills)
+            ranked = True
             if not skills:
                 return ""
 
         # -- max_skills cap (applied after relevance ranking) --------------------
         if max_skills is not None:
-            skills = skills[-max_skills:] if not query else skills[:max_skills]
+            skills = skills[:max_skills] if ranked else skills[-max_skills:]
 
         if not skills:
             return ""
