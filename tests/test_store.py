@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
 from evoskill.backend import FileBackend, StorageBackend
 from evoskill.skill import Skill
-from evoskill.store import SkillStore
+from evoskill.store import SkillStore, _recency_weight
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -773,7 +774,110 @@ class TestSemanticRetrieval:
 
 
 # ---------------------------------------------------------------------------
-# 9. Token-budget-aware injection
+# 9. Recency-weighted ranking
+# ---------------------------------------------------------------------------
+
+
+class TestRecencyWeighting:
+    def test_recency_weight_none_returns_one(self) -> None:
+        skill = Skill(role="dev", content="x", source="manual")
+        assert _recency_weight(skill, None) == 1.0
+
+    def test_recency_weight_zero_half_life_returns_one(self) -> None:
+        skill = Skill(role="dev", content="x", source="manual")
+        assert _recency_weight(skill, 0.0) == 1.0
+
+    def test_brand_new_skill_weight_is_one(self) -> None:
+        now = datetime.now(UTC)
+        skill = Skill(role="dev", content="x", source="manual", created_at=now)
+        assert _recency_weight(skill, 7.0, now=now) == pytest.approx(1.0)
+
+    def test_skill_at_half_life_is_half(self) -> None:
+        now = datetime.now(UTC)
+        skill = Skill(
+            role="dev",
+            content="x",
+            source="manual",
+            created_at=now - timedelta(days=7),
+        )
+        assert _recency_weight(skill, 7.0, now=now) == pytest.approx(0.5)
+
+    def test_skill_at_two_half_lives_is_quarter(self) -> None:
+        now = datetime.now(UTC)
+        skill = Skill(
+            role="dev",
+            content="x",
+            source="manual",
+            created_at=now - timedelta(days=14),
+        )
+        assert _recency_weight(skill, 7.0, now=now) == pytest.approx(0.25)
+
+    def test_recency_boosts_newer_skill_in_ranking(self, store: SkillStore) -> None:
+        """A newer skill should rank higher than an older one, all else equal."""
+        now = datetime.now(UTC)
+        old_skill = Skill(
+            role="dev",
+            content="python tip old",
+            source="learned",
+            created_at=now - timedelta(days=30),
+        )
+        new_skill = Skill(
+            role="dev",
+            content="python tip new",
+            source="learned",
+            created_at=now,
+        )
+        store.add_skill(old_skill)
+        store.add_skill(new_skill)
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.0,
+            recency_half_life=7.0,
+        )
+        # Both have identical similarity and hit_rate, but new_skill is newer
+        pos_new = text.index("tip new")
+        pos_old = text.index("tip old")
+        assert pos_new < pos_old
+
+    def test_recency_disabled_by_default(self, store: SkillStore) -> None:
+        """Without recency_half_life, ordering is by similarity x effectiveness only."""
+        now = datetime.now(UTC)
+        old_skill = Skill(
+            role="dev",
+            content="python tip old",
+            source="learned",
+            hit_count=10,
+            miss_count=0,
+            created_at=now - timedelta(days=365),
+        )
+        new_skill = Skill(
+            role="dev",
+            content="python tip new",
+            source="learned",
+            hit_count=0,
+            miss_count=10,
+            created_at=now,
+        )
+        store.add_skill(old_skill)
+        store.add_skill(new_skill)
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.0,
+        )
+        # No recency: old skill with hit_rate=1.0 should rank above new skill
+        pos_old = text.index("tip old")
+        pos_new = text.index("tip new")
+        assert pos_old < pos_new
+
+
+# ---------------------------------------------------------------------------
+# 10. Token-budget-aware injection
 # ---------------------------------------------------------------------------
 
 

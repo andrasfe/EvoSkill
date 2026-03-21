@@ -113,6 +113,7 @@ def evoskill(
     batch_size: int = 10,
     embed: Callable[..., list[float]] | None = None,
     relevance_threshold: float = 0.1,
+    recency_half_life: float | None = None,
     max_tokens: int | None = None,
     compact: bool = False,
 ) -> Callable:
@@ -175,6 +176,12 @@ def evoskill(
     relevance_threshold:
         Minimum cosine similarity for a skill to be included during
         semantic retrieval.  Default ``0.1``.
+    recency_half_life:
+        Half-life in days for recency decay.  When set, newer skills
+        receive a higher ranking boost during semantic retrieval.
+        A skill whose age equals *recency_half_life* retains 50 % of
+        the recency bonus.  Without semantic ranking, skills are
+        always returned most-recent-first regardless of this value.
     max_tokens:
         Approximate token budget for the injected skill block.  Skills
         are added in rank order until the budget is exhausted.
@@ -244,6 +251,7 @@ def evoskill(
                 query=semantic_query,
                 embed=embed,
                 relevance_threshold=relevance_threshold,
+                recency_half_life=recency_half_life,
                 max_tokens=max_tokens,
                 compact=compact,
                 llm=compact_llm,

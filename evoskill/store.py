@@ -6,6 +6,7 @@ import math
 import re
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from .backend import FileBackend, StorageBackend
@@ -91,6 +92,7 @@ class SkillStore:
         query: str | None = None,
         embed: Callable[[str], list[float]] | None = None,
         relevance_threshold: float = 0.1,
+        recency_half_life: float | None = None,
         max_tokens: int | None = None,
         compact: bool = False,
         llm: Callable[[list[dict[str, str]]], str] | None = None,
@@ -111,6 +113,13 @@ class SkillStore:
         relevance_threshold:
             Minimum cosine similarity for a skill to be included when
             *query* is provided.  Default ``0.1``.
+        recency_half_life:
+            Half-life in days for recency decay.  When set, newer skills
+            receive a higher ranking boost via an exponential decay
+            multiplier.  A skill whose age equals *recency_half_life*
+            retains 50 % of the recency bonus.  When ``None`` (default),
+            recency is not factored into ranking.  Without semantic
+            ranking, skills are always returned most-recent-first.
         max_tokens:
             Approximate token budget for the returned block.  Skills are
             added in rank order until the budget is exhausted.  Uses a
@@ -136,6 +145,7 @@ class SkillStore:
                 query,
                 embed,
                 relevance_threshold,
+                recency_half_life=recency_half_life,
             )
             # Persist embeddings for ALL skills (including those below
             # threshold) to avoid redundant embed calls on future invocations.
@@ -756,25 +766,53 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _recency_weight(
+    skill: Skill,
+    half_life_days: float | None,
+    *,
+    now: datetime | None = None,
+) -> float:
+    """Exponential recency multiplier in ``(0, 1]``.
+
+    Returns ``1.0`` when *half_life_days* is ``None`` (recency disabled).
+    A skill whose age equals *half_life_days* scores ``0.5``.
+    """
+    if half_life_days is None or half_life_days <= 0:
+        return 1.0
+    if now is None:
+        now = datetime.now(UTC)
+    age_days = max((now - skill.created_at).total_seconds() / 86_400, 0.0)
+    return math.pow(0.5, age_days / half_life_days)
+
+
 def _rank_by_relevance(
     skills: list[Skill],
     query: str,
     embed: Callable[[str], list[float]],
     threshold: float,
+    *,
+    recency_half_life: float | None = None,
 ) -> list[Skill]:
     """Return *skills* ranked by relevance to *query*, filtered by *threshold*.
 
-    Ranking score = ``cosine_similarity x (0.5 + 0.5 x hit_rate)``.
+    Ranking score::
+
+        similarity x (0.5 + 0.5 x hit_rate) x recency_weight
+
     Skills with no hit/miss data get a neutral effectiveness weight of 0.5.
+    ``recency_weight`` is an exponential decay controlled by
+    *recency_half_life* (days).  When ``None``, recency is neutral (1.0).
     """
     query_embedding = embed(query)
+    now = datetime.now(UTC)
     scored: list[tuple[float, Skill]] = []
     for skill in skills:
         if skill.embedding is None:
             skill.embedding = embed(skill.content)
         sim = _cosine_similarity(query_embedding, skill.embedding)
         effectiveness = 0.5 + 0.5 * skill.hit_rate
-        score = sim * effectiveness
+        recency = _recency_weight(skill, recency_half_life, now=now)
+        score = sim * effectiveness * recency
         if sim >= threshold:
             scored.append((score, skill))
     scored.sort(key=lambda pair: pair[0], reverse=True)
