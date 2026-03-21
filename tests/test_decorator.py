@@ -879,3 +879,157 @@ class TestBatchSizeAndFlush:
         assert hasattr(async_agent, "flush")
         assert callable(sync_agent.flush)
         assert callable(async_agent.flush)
+
+
+# ---------------------------------------------------------------------------
+# Smart skill injection via decorator
+# ---------------------------------------------------------------------------
+
+
+def _directional_embed(text: str) -> list[float]:
+    """Embedding that maps 'python' and 'sql' to distinct directions."""
+    if "python" in text.lower():
+        return [1.0, 0.0, 0.0, 0.0]
+    if "sql" in text.lower():
+        return [0.0, 1.0, 0.0, 0.0]
+    return [0.0, 0.0, 1.0, 0.0]
+
+
+class TestDecoratorSmartInjection:
+    def test_embed_filters_irrelevant_skills(self, tmp_path: Path) -> None:
+        @evoskill(
+            role="dev",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+        )
+        def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("dev", "use python type hints")
+        agent._evoskill_store.add_manual_skill("dev", "always use SQL joins")
+
+        result = agent("python tips please")
+        assert "type hints" in result
+        assert "SQL joins" not in result
+
+    def test_embed_without_query_injects_all(self, tmp_path: Path) -> None:
+        """When input is empty string, query=None so no semantic filtering."""
+
+        @evoskill(role="dev", embed=_directional_embed)
+        def agent(data: dict) -> str:
+            return str(data)
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("dev", "skill A")
+        agent._evoskill_store.add_manual_skill("dev", "skill B")
+
+        result = agent({"key": "val"})
+        # No string input means query=None, so all skills injected
+        assert "key" in result
+
+    def test_max_tokens_limits_decorator_injection(self, tmp_path: Path) -> None:
+        @evoskill(role="dev", max_tokens=30)
+        def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        for i in range(20):
+            agent._evoskill_store.add_manual_skill(
+                "dev", f"this is a long skill number {i} with extra words"
+            )
+
+        result = agent("test")
+        # Should have significantly fewer skills than 20 due to token budget
+        skill_count = result.count("long skill number")
+        assert 0 < skill_count < 20
+
+    def test_compact_mode_via_decorator(self, tmp_path: Path) -> None:
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "Compressed guidance paragraph."
+
+        @evoskill(role="dev", compact=True, llm=fake_llm)
+        def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("dev", "validate inputs")
+        agent._evoskill_store.add_manual_skill("dev", "handle errors")
+
+        result = agent("test")
+        assert "Compressed guidance paragraph" in result
+
+    def test_compact_without_llm_falls_back(self, tmp_path: Path) -> None:
+        @evoskill(role="dev", compact=True)
+        def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("dev", "validate inputs")
+
+        result = agent("test")
+        # Falls back to bullet-list format since llm=None
+        assert "- validate inputs" in result
+
+    def test_all_smart_params_combined(self, tmp_path: Path) -> None:
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "Python guidance only."
+
+        @evoskill(
+            role="dev",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+            max_tokens=500,
+            compact=True,
+            llm=fake_llm,
+        )
+        def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("dev", "use python type hints")
+        agent._evoskill_store.add_manual_skill("dev", "always use SQL joins")
+
+        result = agent("python best practices")
+        assert "Python guidance only" in result
+
+    def test_async_with_smart_injection(self, tmp_path: Path) -> None:
+        @evoskill(
+            role="dev",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+        )
+        async def agent(prompt: str) -> str:
+            return prompt
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("dev", "use python type hints")
+        agent._evoskill_store.add_manual_skill("dev", "always use SQL joins")
+
+        result = asyncio.get_event_loop().run_until_complete(
+            agent("python tips")
+        )
+        assert "type hints" in result
+        assert "SQL joins" not in result
+
+    def test_extract_input_used_as_query(self, tmp_path: Path) -> None:
+        def my_extract(input_data):
+            return input_data.task
+
+        @evoskill(
+            role="dev",
+            extract_input=my_extract,
+            inject_field="skill_context",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+        )
+        def agent(input_data: AgentInput) -> str:
+            return f"ctx={input_data.skill_context} task={input_data.task}"
+
+        agent._evoskill_store._path = _store_path(tmp_path)
+        agent._evoskill_store.add_manual_skill("dev", "use python type hints")
+        agent._evoskill_store.add_manual_skill("dev", "always use SQL joins")
+
+        result = agent(AgentInput(task="python review"))
+        assert "type hints" in result
+        assert "SQL joins" not in result

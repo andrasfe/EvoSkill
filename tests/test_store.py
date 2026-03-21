@@ -600,3 +600,221 @@ class TestStoreDeduplication:
         assert len(loaded) == 2
         assert loaded[0].embedding == [0.1, 0.2]
         assert loaded[1].embedding == [0.3, 0.4]
+
+
+# ---------------------------------------------------------------------------
+# 8. Semantic skill retrieval (query-based relevance)
+# ---------------------------------------------------------------------------
+
+
+def _directional_embed(text: str) -> list[float]:
+    """Embedding that maps 'python' and 'sql' to distinct directions.
+
+    Skills containing 'python' get [1, 0, 0, 0],
+    skills containing 'sql' get [0, 1, 0, 0],
+    everything else gets [0, 0, 1, 0].
+    """
+    if "python" in text.lower():
+        return [1.0, 0.0, 0.0, 0.0]
+    if "sql" in text.lower():
+        return [0.0, 1.0, 0.0, 0.0]
+    return [0.0, 0.0, 1.0, 0.0]
+
+
+class TestSemanticRetrieval:
+    def test_query_filters_by_relevance(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "use list comprehensions in python")
+        store.add_manual_skill("dev", "always use SQL joins")
+        store.add_manual_skill("dev", "write docstrings")
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+        )
+        assert "list comprehensions" in text
+        assert "SQL joins" not in text
+        assert "docstrings" not in text
+
+    def test_query_returns_all_when_no_embed(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "skill A")
+        store.add_manual_skill("dev", "skill B")
+        text = store.get_skills_text("dev", query="anything")
+        assert "skill A" in text
+        assert "skill B" in text
+
+    def test_query_empty_store_returns_empty(self, store: SkillStore) -> None:
+        text = store.get_skills_text(
+            "dev",
+            query="python",
+            embed=_directional_embed,
+        )
+        assert text == ""
+
+    def test_query_no_match_returns_empty(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "always use SQL joins")
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+        )
+        assert text == ""
+
+    def test_relevance_ranking_order(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "always use SQL joins")
+        store.add_manual_skill("dev", "use python type hints")
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.0,
+        )
+        # Python skill should come first (higher relevance)
+        python_pos = text.index("type hints")
+        sql_pos = text.index("SQL joins")
+        assert python_pos < sql_pos
+
+    def test_hit_rate_boosts_ranking(self, store: SkillStore) -> None:
+        s1 = Skill(
+            role="dev",
+            content="python tip A",
+            source="learned",
+            hit_count=10,
+            miss_count=0,
+        )
+        s2 = Skill(
+            role="dev",
+            content="python tip B",
+            source="learned",
+            hit_count=0,
+            miss_count=10,
+        )
+        store.add_skill(s1)
+        store.add_skill(s2)
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.0,
+        )
+        # s1 has hit_rate=1.0 and s2 has hit_rate=0.0
+        # s1 score = 1.0 * (0.5 + 0.5*1.0) = 1.0
+        # s2 score = 1.0 * (0.5 + 0.5*0.0) = 0.5
+        pos_a = text.index("tip A")
+        pos_b = text.index("tip B")
+        assert pos_a < pos_b
+
+    def test_max_skills_with_query_takes_top_k(self, store: SkillStore) -> None:
+        for i in range(5):
+            store.add_manual_skill("dev", f"python skill {i}")
+
+        text = store.get_skills_text(
+            "dev",
+            query="python",
+            embed=_directional_embed,
+            max_skills=2,
+        )
+        count = text.count("python skill")
+        assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# 9. Token-budget-aware injection
+# ---------------------------------------------------------------------------
+
+
+class TestTokenBudget:
+    def test_max_tokens_limits_output(self, store: SkillStore) -> None:
+        for i in range(20):
+            store.add_manual_skill("dev", f"This is a fairly long skill number {i} with extra words")
+
+        text_unlimited = store.get_skills_text("dev")
+        text_limited = store.get_skills_text("dev", max_tokens=50)
+
+        assert len(text_limited) < len(text_unlimited)
+        assert text_limited.startswith("[EvoSkill]")
+
+    def test_max_tokens_zero_returns_empty(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "some skill")
+        text = store.get_skills_text("dev", max_tokens=0)
+        assert text == ""
+
+    def test_max_tokens_very_large_returns_all(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "skill A")
+        store.add_manual_skill("dev", "skill B")
+        text = store.get_skills_text("dev", max_tokens=10000)
+        assert "skill A" in text
+        assert "skill B" in text
+
+    def test_max_tokens_with_query(self, store: SkillStore) -> None:
+        for i in range(10):
+            store.add_manual_skill("dev", f"python tip {i} with some extra content")
+
+        text = store.get_skills_text(
+            "dev",
+            query="python",
+            embed=_directional_embed,
+            max_tokens=30,
+        )
+        assert "[EvoSkill]" in text
+        # Should have fewer skills than total
+        count = text.count("python tip")
+        assert 0 < count < 10
+
+
+# ---------------------------------------------------------------------------
+# 10. Compact injection mode
+# ---------------------------------------------------------------------------
+
+
+class TestCompactMode:
+    def test_compact_uses_llm_to_compress(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "always validate input")
+        store.add_manual_skill("dev", "handle errors gracefully")
+        store.add_manual_skill("dev", "write unit tests")
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            assert "validate input" in messages[1]["content"]
+            assert "handle errors" in messages[1]["content"]
+            assert "unit tests" in messages[1]["content"]
+            return "Validate inputs, handle errors, and test thoroughly."
+
+        text = store.get_skills_text("dev", compact=True, llm=fake_llm)
+        assert "Validate inputs" in text
+        assert "[EvoSkill]" in text
+        assert text.endswith("\n\n")
+
+    def test_compact_without_llm_falls_back_to_bullets(
+        self, store: SkillStore
+    ) -> None:
+        store.add_manual_skill("dev", "always validate input")
+        text = store.get_skills_text("dev", compact=True)
+        assert "- always validate input" in text
+
+    def test_compact_empty_store_returns_empty(self, store: SkillStore) -> None:
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called")
+
+        text = store.get_skills_text("dev", compact=True, llm=fake_llm)
+        assert text == ""
+
+    def test_compact_with_query_and_max_tokens(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "use python type hints")
+        store.add_manual_skill("dev", "always use SQL joins")
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "Use type hints always."
+
+        text = store.get_skills_text(
+            "dev",
+            query="python",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+            compact=True,
+            llm=fake_llm,
+        )
+        assert "type hints always" in text

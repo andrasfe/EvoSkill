@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 from dataclasses import dataclass, field
@@ -87,16 +88,72 @@ class SkillStore:
         *,
         tags: list[str] | None = None,
         max_skills: int | None = None,
+        query: str | None = None,
+        embed: Callable[[str], list[float]] | None = None,
+        relevance_threshold: float = 0.1,
+        max_tokens: int | None = None,
+        compact: bool = False,
+        llm: Callable[[list[dict[str, str]]], str] | None = None,
     ) -> str:
         """Return the formatted skill block ready to paste into a prompt.
 
         Returns an empty string if there are no matching skills.
+
+        Parameters
+        ----------
+        query:
+            When provided (together with *embed*), skills are ranked by
+            semantic relevance to the query and only those above
+            *relevance_threshold* are included.
+        embed:
+            Embedding callable ``(text) -> list[float]`` used for
+            semantic retrieval.  Required when *query* is set.
+        relevance_threshold:
+            Minimum cosine similarity for a skill to be included when
+            *query* is provided.  Default ``0.1``.
+        max_tokens:
+            Approximate token budget for the returned block.  Skills are
+            added in rank order until the budget is exhausted.  Uses a
+            simple ``len(text.split()) * 1.3`` heuristic.
+        compact:
+            When ``True``, the selected skills are compressed into a
+            single concise paragraph via *llm* before returning.
+            Requires *llm* to be set; silently falls back to the normal
+            bullet list when *llm* is ``None``.
+        llm:
+            LLM callable used for *compact* mode.
         """
         skills = self.get_skills(role, tags=tags)
-        if max_skills is not None:
-            skills = skills[-max_skills:]
         if not skills:
             return ""
+
+        # -- semantic ranking ----------------------------------------------------
+        if query and embed is not None:
+            skills = _rank_by_relevance(
+                skills, query, embed, relevance_threshold,
+            )
+            # Persist any newly-computed embeddings
+            self._update_embeddings(role, skills)
+            if not skills:
+                return ""
+
+        # -- max_skills cap (applied after relevance ranking) --------------------
+        if max_skills is not None:
+            skills = skills[-max_skills:] if not query else skills[:max_skills]
+
+        if not skills:
+            return ""
+
+        # -- token-budget filtering ----------------------------------------------
+        if max_tokens is not None:
+            skills = _fit_token_budget(skills, max_tokens)
+            if not skills:
+                return ""
+
+        # -- compact mode --------------------------------------------------------
+        if compact and llm is not None:
+            return _compact_skills(skills, role, llm)
+
         lines = [_INJECTION_HEADER]
         for s in skills:
             lines.append(f"- {s.content}")
@@ -675,3 +732,93 @@ def _parse_numbered_list(text: str) -> list[str]:
         if m:
             result.append(m.group(1).strip())
     return result
+
+
+# ---------------------------------------------------------------------------
+# Smart injection helpers
+# ---------------------------------------------------------------------------
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _rank_by_relevance(
+    skills: list[Skill],
+    query: str,
+    embed: Callable[[str], list[float]],
+    threshold: float,
+) -> list[Skill]:
+    """Return *skills* ranked by relevance to *query*, filtered by *threshold*.
+
+    Ranking score = ``cosine_similarity x (0.5 + 0.5 x hit_rate)``.
+    Skills with no hit/miss data get a neutral effectiveness weight of 0.5.
+    """
+    query_embedding = embed(query)
+    scored: list[tuple[float, Skill]] = []
+    for skill in skills:
+        if skill.embedding is None:
+            skill.embedding = embed(skill.content)
+        sim = _cosine_similarity(query_embedding, skill.embedding)
+        effectiveness = 0.5 + 0.5 * skill.hit_rate
+        score = sim * effectiveness
+        if sim >= threshold:
+            scored.append((score, skill))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [skill for _, skill in scored]
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ``ceil(word_count x 1.3)``."""
+    return math.ceil(len(text.split()) * 1.3)
+
+
+def _fit_token_budget(skills: list[Skill], max_tokens: int) -> list[Skill]:
+    """Return a prefix of *skills* that fits within *max_tokens*.
+
+    Accounts for the injection header and bullet formatting.
+    """
+    header_tokens = _estimate_tokens(_INJECTION_HEADER)
+    budget = max_tokens - header_tokens
+    if budget <= 0:
+        return []
+    result: list[Skill] = []
+    used = 0
+    for skill in skills:
+        line_tokens = _estimate_tokens(f"- {skill.content}")
+        if used + line_tokens > budget:
+            break
+        result.append(skill)
+        used += line_tokens
+    return result
+
+
+_COMPACT_SYSTEM = (
+    "You are a concise summarizer. Given a list of agent skills, compress "
+    "them into a single short paragraph (2-4 sentences) that captures the "
+    "key guidance. Output ONLY the paragraph — no preamble, no bullet points."
+)
+
+
+def _compact_skills(
+    skills: list[Skill],
+    role: str,
+    llm: Callable[[list[dict[str, str]]], str],
+) -> str:
+    """Compress *skills* into a compact paragraph via *llm*."""
+    bullet_list = "\n".join(f"- {s.content}" for s in skills)
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _COMPACT_SYSTEM},
+        {
+            "role": "user",
+            "content": f"Role: {role}\n\nSkills:\n{bullet_list}",
+        },
+    ]
+    compressed = llm(messages).strip()
+    return f"[EvoSkill] Guidance for this role:\n{compressed}\n\n"
