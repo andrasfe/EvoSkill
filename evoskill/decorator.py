@@ -111,6 +111,11 @@ def evoskill(
     teach_role: str | None = None,
     is_method: bool | None = None,
     batch_size: int = 10,
+    embed: Callable[..., list[float]] | None = None,
+    relevance_threshold: float = 0.1,
+    recency_half_life: float | None = None,
+    max_tokens: int | None = None,
+    compact: bool = False,
 ) -> Callable:
     """Decorator that adds runtime skill learning to any function/method.
 
@@ -164,6 +169,25 @@ def evoskill(
         Number of learning triggers to buffer before flushing via
         :func:`synthesize_skill_batch`.  Defaults to ``10``.  Call
         ``wrapper.flush()`` at end-of-run to drain remaining items.
+    embed:
+        Embedding callable ``(text) -> list[float]`` used for semantic
+        skill retrieval.  When provided, the decorator automatically
+        uses the current input as a query to select only relevant skills.
+    relevance_threshold:
+        Minimum cosine similarity for a skill to be included during
+        semantic retrieval.  Default ``0.1``.
+    recency_half_life:
+        Half-life in days for recency decay.  When set, newer skills
+        receive a higher ranking boost during semantic retrieval.
+        A skill whose age equals *recency_half_life* retains 50 % of
+        the recency bonus.  Without semantic ranking, skills are
+        always returned most-recent-first regardless of this value.
+    max_tokens:
+        Approximate token budget for the injected skill block.  Skills
+        are added in rank order until the budget is exhausted.
+    compact:
+        When ``True``, compress selected skills into a single concise
+        paragraph via *llm* before injection.  Requires *llm*.
     """
 
     if inject_skills is not None and inject_field is not None:
@@ -196,13 +220,8 @@ def evoskill(
             resolved_role = _resolve_role(func, role, resolved_is_method, args)
             _ensure_manual_skills(resolved_role)
 
-            skills_text = store.get_skills_text(
-                resolved_role,
-                tags=tags,
-                max_skills=max_skills,
-            )
-
-            # Determine original prompt for synthesis context
+            # Determine original prompt for synthesis context (needed before
+            # get_skills_text so it can be used as the semantic query)
             if extract_input is not None:
                 original_prompt = extract_input(*args, **kwargs)
             else:
@@ -210,6 +229,33 @@ def evoskill(
                 original_prompt = ""
                 if len(args) > prompt_idx and isinstance(args[prompt_idx], str):
                     original_prompt = args[prompt_idx]
+
+            # Only use the prompt as a semantic query when an embed fn is
+            # provided — otherwise query would change max_skills slicing
+            # behaviour without adding any relevance filtering.
+            semantic_query = (original_prompt or None) if embed is not None else None
+
+            # compact mode requires a *sync* LLM callable (it calls
+            # llm(messages).strip()).  When the user supplies an async LLM
+            # we fall back to the bullet-list format to avoid a crash.
+            compact_llm = (
+                llm
+                if (llm is not None and not asyncio.iscoroutinefunction(llm))
+                else None
+            )
+
+            skills_text = store.get_skills_text(
+                resolved_role,
+                tags=tags,
+                max_skills=max_skills,
+                query=semantic_query,
+                embed=embed,
+                relevance_threshold=relevance_threshold,
+                recency_half_life=recency_half_life,
+                max_tokens=max_tokens,
+                compact=compact,
+                llm=compact_llm,
+            )
 
             if inject_skills is not None:
                 new_args, new_kwargs = inject_skills(args, kwargs, skills_text)
