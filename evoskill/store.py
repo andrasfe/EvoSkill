@@ -130,7 +130,10 @@ class SkillStore:
         # -- semantic ranking ----------------------------------------------------
         if query and embed is not None:
             skills = _rank_by_relevance(
-                skills, query, embed, relevance_threshold,
+                skills,
+                query,
+                embed,
+                relevance_threshold,
             )
             # Persist any newly-computed embeddings
             self._update_embeddings(role, skills)

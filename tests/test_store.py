@@ -730,7 +730,9 @@ class TestSemanticRetrieval:
 class TestTokenBudget:
     def test_max_tokens_limits_output(self, store: SkillStore) -> None:
         for i in range(20):
-            store.add_manual_skill("dev", f"This is a fairly long skill number {i} with extra words")
+            store.add_manual_skill(
+                "dev", f"This is a fairly long skill number {i} with extra words"
+            )
 
         text_unlimited = store.get_skills_text("dev")
         text_limited = store.get_skills_text("dev", max_tokens=50)
@@ -788,9 +790,7 @@ class TestCompactMode:
         assert "[EvoSkill]" in text
         assert text.endswith("\n\n")
 
-    def test_compact_without_llm_falls_back_to_bullets(
-        self, store: SkillStore
-    ) -> None:
+    def test_compact_without_llm_falls_back_to_bullets(self, store: SkillStore) -> None:
         store.add_manual_skill("dev", "always validate input")
         text = store.get_skills_text("dev", compact=True)
         assert "- always validate input" in text

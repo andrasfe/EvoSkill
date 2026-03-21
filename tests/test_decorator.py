@@ -1006,9 +1006,7 @@ class TestDecoratorSmartInjection:
         agent._evoskill_store.add_manual_skill("dev", "use python type hints")
         agent._evoskill_store.add_manual_skill("dev", "always use SQL joins")
 
-        result = asyncio.get_event_loop().run_until_complete(
-            agent("python tips")
-        )
+        result = asyncio.get_event_loop().run_until_complete(agent("python tips"))
         assert "type hints" in result
         assert "SQL joins" not in result
 
