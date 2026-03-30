@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
 from evoskill.backend import FileBackend, StorageBackend
 from evoskill.skill import Skill
-from evoskill.store import SkillStore
+from evoskill.store import SkillStore, _recency_weight
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -600,3 +601,374 @@ class TestStoreDeduplication:
         assert len(loaded) == 2
         assert loaded[0].embedding == [0.1, 0.2]
         assert loaded[1].embedding == [0.3, 0.4]
+
+
+# ---------------------------------------------------------------------------
+# 8. Semantic skill retrieval (query-based relevance)
+# ---------------------------------------------------------------------------
+
+
+def _directional_embed(text: str) -> list[float]:
+    """Embedding that maps 'python' and 'sql' to distinct directions.
+
+    Skills containing 'python' get [1, 0, 0, 0],
+    skills containing 'sql' get [0, 1, 0, 0],
+    everything else gets [0, 0, 1, 0].
+    """
+    if "python" in text.lower():
+        return [1.0, 0.0, 0.0, 0.0]
+    if "sql" in text.lower():
+        return [0.0, 1.0, 0.0, 0.0]
+    return [0.0, 0.0, 1.0, 0.0]
+
+
+class TestSemanticRetrieval:
+    def test_query_filters_by_relevance(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "use list comprehensions in python")
+        store.add_manual_skill("dev", "always use SQL joins")
+        store.add_manual_skill("dev", "write docstrings")
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+        )
+        assert "list comprehensions" in text
+        assert "SQL joins" not in text
+        assert "docstrings" not in text
+
+    def test_query_returns_all_when_no_embed(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "skill A")
+        store.add_manual_skill("dev", "skill B")
+        text = store.get_skills_text("dev", query="anything")
+        assert "skill A" in text
+        assert "skill B" in text
+
+    def test_query_empty_store_returns_empty(self, store: SkillStore) -> None:
+        text = store.get_skills_text(
+            "dev",
+            query="python",
+            embed=_directional_embed,
+        )
+        assert text == ""
+
+    def test_query_no_match_returns_empty(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "always use SQL joins")
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+        )
+        assert text == ""
+
+    def test_relevance_ranking_order(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "always use SQL joins")
+        store.add_manual_skill("dev", "use python type hints")
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.0,
+        )
+        # Python skill should come first (higher relevance)
+        python_pos = text.index("type hints")
+        sql_pos = text.index("SQL joins")
+        assert python_pos < sql_pos
+
+    def test_hit_rate_boosts_ranking(self, store: SkillStore) -> None:
+        s1 = Skill(
+            role="dev",
+            content="python tip A",
+            source="learned",
+            hit_count=10,
+            miss_count=0,
+        )
+        s2 = Skill(
+            role="dev",
+            content="python tip B",
+            source="learned",
+            hit_count=0,
+            miss_count=10,
+        )
+        store.add_skill(s1)
+        store.add_skill(s2)
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.0,
+        )
+        # s1 has hit_rate=1.0 and s2 has hit_rate=0.0
+        # s1 score = 1.0 * (0.5 + 0.5*1.0) = 1.0
+        # s2 score = 1.0 * (0.5 + 0.5*0.0) = 0.5
+        pos_a = text.index("tip A")
+        pos_b = text.index("tip B")
+        assert pos_a < pos_b
+
+    def test_max_skills_with_query_takes_top_k(self, store: SkillStore) -> None:
+        for i in range(5):
+            store.add_manual_skill("dev", f"python skill {i}")
+
+        text = store.get_skills_text(
+            "dev",
+            query="python",
+            embed=_directional_embed,
+            max_skills=2,
+        )
+        count = text.count("python skill")
+        assert count == 2
+
+    def test_below_threshold_embeddings_persisted(self, store: SkillStore) -> None:
+        """Skills below relevance threshold should still have embeddings saved."""
+        embed_calls = []
+
+        def tracking_embed(text: str) -> list[float]:
+            embed_calls.append(text)
+            return _directional_embed(text)
+
+        store.add_manual_skill("dev", "use python type hints")
+        store.add_manual_skill("dev", "always use SQL joins")
+
+        # First call: both skills get embedded
+        store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=tracking_embed,
+            relevance_threshold=0.5,
+        )
+        first_call_count = len(embed_calls)
+        assert first_call_count >= 3  # query + 2 skills
+
+        # Second call: embeddings were persisted, so skills should NOT be
+        # re-embedded (only the query embedding is new)
+        embed_calls.clear()
+        store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=tracking_embed,
+            relevance_threshold=0.5,
+        )
+        # Only the query should be embedded, not the skills
+        assert len(embed_calls) == 1
+
+    def test_max_skills_without_embed_takes_most_recent(
+        self, store: SkillStore
+    ) -> None:
+        """max_skills without embed should take most-recent (last N), not first N."""
+        for i in range(5):
+            store.add_manual_skill("dev", f"skill {i}")
+
+        text = store.get_skills_text(
+            "dev",
+            query="anything",  # query without embed
+            max_skills=2,
+        )
+        # Without embed, no ranking happens, so last 2 skills should be returned
+        assert "skill 3" in text
+        assert "skill 4" in text
+        assert "skill 0" not in text
+
+
+# ---------------------------------------------------------------------------
+# 9. Recency-weighted ranking
+# ---------------------------------------------------------------------------
+
+
+class TestRecencyWeighting:
+    def test_recency_weight_none_returns_one(self) -> None:
+        skill = Skill(role="dev", content="x", source="manual")
+        assert _recency_weight(skill, None) == 1.0
+
+    def test_recency_weight_zero_half_life_returns_one(self) -> None:
+        skill = Skill(role="dev", content="x", source="manual")
+        assert _recency_weight(skill, 0.0) == 1.0
+
+    def test_brand_new_skill_weight_is_one(self) -> None:
+        now = datetime.now(UTC)
+        skill = Skill(role="dev", content="x", source="manual", created_at=now)
+        assert _recency_weight(skill, 7.0, now=now) == pytest.approx(1.0)
+
+    def test_skill_at_half_life_is_half(self) -> None:
+        now = datetime.now(UTC)
+        skill = Skill(
+            role="dev",
+            content="x",
+            source="manual",
+            created_at=now - timedelta(days=7),
+        )
+        assert _recency_weight(skill, 7.0, now=now) == pytest.approx(0.5)
+
+    def test_skill_at_two_half_lives_is_quarter(self) -> None:
+        now = datetime.now(UTC)
+        skill = Skill(
+            role="dev",
+            content="x",
+            source="manual",
+            created_at=now - timedelta(days=14),
+        )
+        assert _recency_weight(skill, 7.0, now=now) == pytest.approx(0.25)
+
+    def test_recency_boosts_newer_skill_in_ranking(self, store: SkillStore) -> None:
+        """A newer skill should rank higher than an older one, all else equal."""
+        now = datetime.now(UTC)
+        old_skill = Skill(
+            role="dev",
+            content="python tip old",
+            source="learned",
+            created_at=now - timedelta(days=30),
+        )
+        new_skill = Skill(
+            role="dev",
+            content="python tip new",
+            source="learned",
+            created_at=now,
+        )
+        store.add_skill(old_skill)
+        store.add_skill(new_skill)
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.0,
+            recency_half_life=7.0,
+        )
+        # Both have identical similarity and hit_rate, but new_skill is newer
+        pos_new = text.index("tip new")
+        pos_old = text.index("tip old")
+        assert pos_new < pos_old
+
+    def test_recency_disabled_by_default(self, store: SkillStore) -> None:
+        """Without recency_half_life, ordering is by similarity x effectiveness only."""
+        now = datetime.now(UTC)
+        old_skill = Skill(
+            role="dev",
+            content="python tip old",
+            source="learned",
+            hit_count=10,
+            miss_count=0,
+            created_at=now - timedelta(days=365),
+        )
+        new_skill = Skill(
+            role="dev",
+            content="python tip new",
+            source="learned",
+            hit_count=0,
+            miss_count=10,
+            created_at=now,
+        )
+        store.add_skill(old_skill)
+        store.add_skill(new_skill)
+
+        text = store.get_skills_text(
+            "dev",
+            query="python tips",
+            embed=_directional_embed,
+            relevance_threshold=0.0,
+        )
+        # No recency: old skill with hit_rate=1.0 should rank above new skill
+        pos_old = text.index("tip old")
+        pos_new = text.index("tip new")
+        assert pos_old < pos_new
+
+
+# ---------------------------------------------------------------------------
+# 10. Token-budget-aware injection
+# ---------------------------------------------------------------------------
+
+
+class TestTokenBudget:
+    def test_max_tokens_limits_output(self, store: SkillStore) -> None:
+        for i in range(20):
+            store.add_manual_skill(
+                "dev", f"This is a fairly long skill number {i} with extra words"
+            )
+
+        text_unlimited = store.get_skills_text("dev")
+        text_limited = store.get_skills_text("dev", max_tokens=50)
+
+        assert len(text_limited) < len(text_unlimited)
+        assert text_limited.startswith("[EvoSkill]")
+
+    def test_max_tokens_zero_returns_empty(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "some skill")
+        text = store.get_skills_text("dev", max_tokens=0)
+        assert text == ""
+
+    def test_max_tokens_very_large_returns_all(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "skill A")
+        store.add_manual_skill("dev", "skill B")
+        text = store.get_skills_text("dev", max_tokens=10000)
+        assert "skill A" in text
+        assert "skill B" in text
+
+    def test_max_tokens_with_query(self, store: SkillStore) -> None:
+        for i in range(10):
+            store.add_manual_skill("dev", f"python tip {i} with some extra content")
+
+        text = store.get_skills_text(
+            "dev",
+            query="python",
+            embed=_directional_embed,
+            max_tokens=30,
+        )
+        assert "[EvoSkill]" in text
+        # Should have fewer skills than total
+        count = text.count("python tip")
+        assert 0 < count < 10
+
+
+# ---------------------------------------------------------------------------
+# 10. Compact injection mode
+# ---------------------------------------------------------------------------
+
+
+class TestCompactMode:
+    def test_compact_uses_llm_to_compress(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "always validate input")
+        store.add_manual_skill("dev", "handle errors gracefully")
+        store.add_manual_skill("dev", "write unit tests")
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            assert "validate input" in messages[1]["content"]
+            assert "handle errors" in messages[1]["content"]
+            assert "unit tests" in messages[1]["content"]
+            return "Validate inputs, handle errors, and test thoroughly."
+
+        text = store.get_skills_text("dev", compact=True, llm=fake_llm)
+        assert "Validate inputs" in text
+        assert "[EvoSkill]" in text
+        assert text.endswith("\n\n")
+
+    def test_compact_without_llm_falls_back_to_bullets(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "always validate input")
+        text = store.get_skills_text("dev", compact=True)
+        assert "- always validate input" in text
+
+    def test_compact_empty_store_returns_empty(self, store: SkillStore) -> None:
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            raise AssertionError("LLM should not be called")
+
+        text = store.get_skills_text("dev", compact=True, llm=fake_llm)
+        assert text == ""
+
+    def test_compact_with_query_and_max_tokens(self, store: SkillStore) -> None:
+        store.add_manual_skill("dev", "use python type hints")
+        store.add_manual_skill("dev", "always use SQL joins")
+
+        def fake_llm(messages: list[dict[str, str]]) -> str:
+            return "Use type hints always."
+
+        text = store.get_skills_text(
+            "dev",
+            query="python",
+            embed=_directional_embed,
+            relevance_threshold=0.5,
+            compact=True,
+            llm=fake_llm,
+        )
+        assert "type hints always" in text
